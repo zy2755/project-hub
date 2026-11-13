@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>项目管家 · Project Hub</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Cpath d='M18 22h12l4 5h12v17a3 3 0 0 1-3 3H20a3 3 0 0 1-3-3V25a3 3 0 0 1 1-3z' fill='%23fff' opacity='.95'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- 图标库：用 symbol 定义一次，全站 <use> 复用 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h3.6a2 2 0 0 1 1.6.8l.9 1.2h6.9A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.7.5.1.68-.22.68-.48v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.9 1.57 2.34 1.12 2.91.85.09-.66.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05a9.3 9.3 0 0 1 2.5-.34c.85 0 1.7.12 2.5.34 1.9-1.33 2.74-1.05 2.74-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9v2.81c0 .27.18.59.69.48A10.1 10.1 0 0 0 22 12.23C22 6.58 17.52 2 12 2z" fill="currentColor"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M8.5 6.5 3 12l5.5 5.5M15.5 6.5 21 12l-5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.5 2.5 0 0 0-3.5-3.5L4 16.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6.5 7l.8 12.2A1.8 1.8 0 0 0 9.1 21h5.8a1.8 1.8 0 0 0 1.8-1.8L17.5 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.8 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 10l5.9-.9z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="i-star-fill" viewBox="0 0 24 24"><path d="m12 3.8 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 10l5.9-.9z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M20 9V5.5A1.5 1.5 0 0 0 18.5 4H15M4 15v3.5A1.5 1.5 0 0 0 5.5 20H9M20 15v3.5A1.5 1.5 0 0 1 18.5 20H15M7.5 12h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m7.5 10 2.5 2.5-2.5 2.5M12.5 15h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15.5 5.5H5a1.5 1.5 0 0 0-1.5 1.5v10.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.5v2M12 19.5v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2.5 12h2M19.5 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-repo" viewBox="0 0 24 24"><circle cx="7" cy="6" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="18" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 8.4v7.2M9.4 6h4.2a1.4 1.4 0 0 1 1.4 1.4v2.2M9.4 18h2.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.6 20.4 19H3.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 9.8v4.1M12 16.6v.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+</svg>
+
+<div class="app">
+  <!-- ───── 侧栏 ───── -->
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-logo">项</div>
+      <div class="brand-txt">
+        <div class="brand-name">项目管家</div>
+        <div class="brand-sub">Project Hub</div>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav"></nav>
+
+    <div class="side-sec">
+      <div class="side-title">标签</div>
+      <div class="tags" id="tagCloud"></div>
+    </div>
+
+    <div class="side-foot">
+      <button class="ghost" id="themeBtn">
+        <svg class="ico"><use href="#i-moon"></use></svg><span id="themeTxt">切换到深色</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ───── 主区 ───── -->
+  <main class="main">
+    <header class="topbar">
+      <label class="search">
+        <svg class="ico"><use href="#i-search"></use></svg>
+        <input id="q" type="search" placeholder="搜索名称、路径、仓库、标签…" autocomplete="off">
+        <kbd>/</kbd>
+      </label>
+      <div class="toolbar">
+        <select id="sort" class="select" title="排序">
+          <option value="recent">最近提交</option>
+          <option value="name">按名称</option>
+          <option value="status">按状态</option>
+          <option value="added">按添加时间</option>
+        </select>
+        <button class="btn" id="scanBtn"><svg class="ico"><use href="#i-scan"></use></svg>扫描导入</button>
+        <button class="btn primary" id="addBtn"><svg class="ico"><use href="#i-plus"></use></svg>新增项目</button>
+        <button class="icon-btn" id="refreshBtn" title="重新检查所有项目状态"><svg class="ico"><use href="#i-refresh"></use></svg></button>
+      </div>
+    </header>
+
+    <div class="stats" id="stats"></div>
+    <div class="content" id="content"></div>
+  </main>
+</div>
+
+<!-- ───── 新增 / 编辑弹窗 ───── -->
+<div class="overlay" id="formOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h2 id="formTitle">新增项目</h2>
+      <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"></use></svg></button>
+    </div>
+    <form class="modal-body" id="projForm">
+      <input type="hidden" id="fId">
+      <div class="field">
+        <label>项目名称</label>
+        <input id="fName" placeholder="留空则用文件夹名">
+      </div>
+      <div class="field">
+        <label>本地路径 <span class="req">*</span></label>
+        <div class="row">
+          <input id="fPath" placeholder="D:\git克隆\my-project" required>
+          <button type="button" class="btn sm" id="pickBtn">浏览…</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>GitHub 仓库</label>
+        <input id="fGithub" placeholder="https://github.com/用户名/仓库名（也可粘贴 SSH 地址）">
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label>语言</label>
+          <input id="fLang" placeholder="自动识别">
+        </div>
+        <div class="field">
+          <label>标签（逗号分隔）</label>
+          <input id="fTags" placeholder="前端, 练习">
+        </div>
+      </div>
+      <div class="field">
+        <label>备注</label>
+        <input id="fDesc" placeholder="一句话说明这个项目是干嘛的">
+      </div>
+      <label class="check">
+        <input type="checkbox" id="fFav"> 加入收藏（置顶显示）
+      </label>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ───── 扫描导入弹窗 ───── -->
+<div class="overlay" id="scanOverlay" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h2>扫描本地仓库</h2>
+      <button class="icon-btn" data-close-scan><svg class="ico"><use href="#i-close"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>从哪个目录开始扫？</label>
+        <div class="row">
+          <input id="sRoot" placeholder="例如 D:\git克隆">
+          <button type="button" class="btn sm" id="sPick">浏览…</button>
+        </div>
+        <div class="hint" id="rootHints"></div>
+      </div>
+      <div class="field">
+        <label>往下找几层</label>
+        <select id="sDepth" class="select">
+          <option value="2">2 层（快）</option>
+          <option value="3" selected>3 层（推荐）</option>
+          <option value="4">4 层（慢一些）</option>
+        </select>
+      </div>
+      <div class="scan-result" id="scanResult">
+        <div class="empty-sm">还没扫描。点下面的「开始扫描」。</div>
+      </div>
+      <div class="modal-foot">
+        <span class="grow" id="scanInfo"></span>
+        <button type="button" class="btn" data-close-scan>关闭</button>
+        <button type="button" class="btn" id="scanRun">开始扫描</button>
+        <button type="button" class="btn primary" id="scanImport" disabled>导入选中</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ───── 目录选择器（内置，不依赖系统对话框） ───── -->
+<div class="overlay" id="pickerOverlay" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h2>选择文件夹</h2>
+      <button class="icon-btn" data-close-picker><svg class="ico"><use href="#i-close"></use></svg></button>
+    </div>
+    <div class="modal-body picker-body">
+      <div class="picker-bar">
+        <button class="btn sm" id="pickUp" title="上一级"><svg class="ico"><use href="#i-up"></use></svg></button>
+        <input id="pickPath" class="picker-input" placeholder="直接粘贴路径后按回车跳转" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="picker-short" id="pickShort"></div>
+      <div class="dir-list" id="dirList"></div>
+      <div class="picker-hint" id="pickInfo"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close-picker>取消</button>
+      <button class="btn primary" id="pickConfirm">选择此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

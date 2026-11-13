@@ -1,0 +1,6 @@
+# Windows 启动脚本必须是 CRLF，否则 cmd 解析标签和 if 块会出问题
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
