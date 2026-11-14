@@ -830,14 +830,14 @@ def _gh_error(text: str) -> str:
             or "connection refused" in low or "proxyconnect" in low:
         return "连不上 GitHub。检查网络；如果你平时靠代理上网，需要先让 gh 走代理" \
                "（设置环境变量 HTTPS_PROXY=http://127.0.0.1:7890）。"
+    # 必须排在 404 前面：gh 对找不着的 release 只回一句 "release not found"，
+    # 那句里也含 not found，排在后面就会被误翻译成「仓库不存在」，驴唇不对马嘴
+    if "release not found" in low or "no release" in low:
+        return "GitHub 上找不到这个版本号的 release，可能它已经被删了，刷新面板再看"
     if "http 404" in low or "not found" in low:
         return "GitHub 上找不到这个仓库，或者当前账号没有权限访问"
     if "http 403" in low:
         return "没有权限操作这个仓库的 release，确认它属于当前登录的账号"
-    # 必须排在 404 前面：gh 对找不着的 release 只回一句 "release not found"，
-    # 先被 404 那条吃掉的话会说成「仓库不存在」，驴唇不对马嘴
-    if "release not found" in low or "no release" in low:
-        return "GitHub 上找不到这个版本号的 release，可能它已经被删了，刷新面板再看"
     if "already exists" in low:
         return "这个版本号已经有 release 了，换一个，或去 GitHub 上删掉旧的"
     if "tag" in low and ("exist" in low or "invalid" in low):
@@ -846,6 +846,94 @@ def _gh_error(text: str) -> str:
         return "资产文件超过 GitHub 单文件 2GB 上限"
     body = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     return (body[-1] if body else "")[:220] or "发布失败，原因未知"
+
+
+# ─────────────────────────── 环境自检 ───────────────────────────
+#
+# 换一台新机器，这三件事没一样是「装好软件就自动有」的：
+# git 决定能不能读状态、提交、推送；gh 决定发布 Release 和推送时的凭据。
+# 缺了不是报错，而是各种功能静默降级（卡片上没分支、按钮点了没反应），
+# 所以要在界面上直说缺什么，而不是让人对着一堆空字段猜。
+
+_ENV_CACHE: dict = {"at": 0.0, "data": None}
+
+
+def _simple_run(argv: list[str], timeout: int = 10) -> tuple[int, str]:
+    """跑个不联网的小命令，只要返回码和合并后的输出。"""
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, timeout=timeout, env=_gh_env(), **NO_WINDOW,
+        )
+        out = (proc.stdout + proc.stderr).decode("utf-8", "replace").strip()
+        return proc.returncode, out
+    except Exception:  # noqa: BLE001  命令不存在 / 超时 / 权限
+        return 1, ""
+
+
+def _gh_account() -> str:
+    """
+    从 gh 的本地配置里读当前账号。
+
+    为什么不跑 `gh auth status`：那个会去 GitHub 校验一次 token，网络稍慢就是
+    一两秒，而这里只是想显示个用户名，不值当。hosts.yml 是 gh 登录时写下的，
+    里面就有 user 字段，读文件几十毫秒。
+    """
+    cands = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        cands.append(os.path.join(appdata, "GitHub CLI", "hosts.yml"))
+    cands.append(os.path.expanduser("~/.config/gh/hosts.yml"))
+    for p in cands:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.search(r"^\s*user:\s*(\S+)\s*$", text, re.M)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def env_check(force: bool = False) -> dict:
+    """
+    检查 git / gh / gh 登录状态。
+
+    缓存 60 秒：这些不会在两次点击之间变化，而 git --version 在冷启动的
+    机器上能占几百毫秒，没必要每次刷页面都跑一遍。
+    """
+    now = time.time()
+    if not force and _ENV_CACHE["data"] and now - _ENV_CACHE["at"] < 60:
+        return _ENV_CACHE["data"]
+
+    info = {
+        "platform": "windows" if os.name == "nt" else "other",
+        "git": {"ok": False, "version": ""},
+        "gh": {"ok": False, "version": "", "authed": False, "account": ""},
+    }
+
+    code, out = _simple_run(["git", "--version"])
+    if code == 0 and out:
+        m = re.search(r"(\d+\.\d+(?:\.\d+)*)", out)
+        info["git"] = {"ok": True, "version": m.group(1) if m else out[:40]}
+
+    gh = _gh_bin()
+    if gh:
+        code, out = _simple_run([gh, "--version"])
+        m = re.search(r"(\d+\.\d+(?:\.\d+)*)", out)
+        info["gh"]["ok"] = code == 0
+        info["gh"]["version"] = (m.group(1) if m else "") if code == 0 else ""
+
+        # 用 `gh auth token` 判断有没有凭据：它只读本地配置，不联网。
+        # （`gh auth status` 会去打 API 校验 token，网络不通时会被误判成「没登录」）
+        code, out = _simple_run([gh, "auth", "token"], timeout=8)
+        if code == 0 and out:
+            info["gh"]["authed"] = True
+            info["gh"]["account"] = _gh_account()
+
+    _ENV_CACHE["at"] = now
+    _ENV_CACHE["data"] = info
+    return info
 
 
 # 打包时永远跳过的目录 —— 这些是缓存/构建产物，进源码包纯属添乱
@@ -1818,6 +1906,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._ok(state_payload(probe=probe))
         if path == "/api/ping":
             return self._ok({"app": APP_NAME, "pid": os.getpid()})
+        if path == "/api/env":
+            force = "force=1" in (self.path.split("?", 1) + [""])[1]
+            return self._ok(env_check(force=force))
         m = re.fullmatch(r"/api/projects/([0-9a-f]+)/git", path)
         if m:
             rec = find_project(m.group(1))

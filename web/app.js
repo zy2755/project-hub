@@ -1284,6 +1284,19 @@ function bind() {
     if (e.key === 'r' || e.key === 'R') { e.preventDefault(); silentProbe(); }
   });
 
+  // 环境提示条：内容是动态渲染的，用委托
+  $('#envBar').addEventListener('click', (e) => {
+    if (e.target.closest('#envClose')) {
+      $('#envBar').hidden = true;
+      return;
+    }
+    const cp = e.target.closest('[data-copy]');
+    if (!cp) return;
+    navigator.clipboard.writeText(cp.dataset.copy)
+      .then(() => toast('已复制，到终端里粘一下'))
+      .catch(() => toast('复制失败，手动输入这条命令', true));
+  });
+
   // 主题
   $('#themeBtn').addEventListener('click', () => {
     const cur = document.documentElement.dataset.theme;
@@ -1297,6 +1310,61 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = mode;
   $('#themeTxt').textContent = mode === 'dark' ? '切换到浅色' : '切换到深色';
   $('#themeBtn').querySelector('use').setAttribute('href', mode === 'dark' ? '#i-sun' : '#i-moon');
+}
+
+/* ───────── 环境自检 ─────────
+   换台新机器，git / gh / gh 登录状态都得自己装、自己登。
+   缺了不会报错，只会静默失灵（卡片没分支、点了发布没反应），
+   所以缺什么就在顶上直说，并给出该做的下一步。 */
+
+function envItems(e) {
+  const out = [];
+  if (!e.git || !e.git.ok) {
+    out.push({
+      txt: '没检测到 git —— 读分支、提交、推送全都要它',
+      link: { href: 'https://git-scm.com/download/win', label: '下载 Git' },
+    });
+  }
+  if (!e.gh || !e.gh.ok) {
+    out.push({
+      txt: '没检测到 GitHub CLI（gh）—— 发布 Release 和推送时的凭据都靠它',
+      link: { href: 'https://cli.github.com', label: '下载 gh' },
+    });
+  } else if (!e.gh.authed) {
+    out.push({
+      txt: 'gh 装了，但还没登录 GitHub —— 在终端跑一次下面这条，之后本机就一直有效',
+      cmd: 'gh auth login',
+    });
+  }
+  return out;
+}
+
+async function checkEnv() {
+  const bar = $('#envBar');
+  if (!bar) return;
+  let e;
+  try {
+    e = await api('/api/env');
+  } catch {
+    return;                     // 自检失败不该干扰正常使用
+  }
+  const items = envItems(e);
+  if (!items.length) {
+    bar.hidden = true;
+    return;
+  }
+  bar.innerHTML = `<div class="env-in">${items.map((it) => `
+    <div class="env-row">
+      ${icon('i-alert')}
+      <span class="env-txt">${esc(it.txt)}</span>
+      ${it.cmd ? `<code class="env-cmd">${esc(it.cmd)}</code>
+        <button class="env-copy" data-copy="${esc(it.cmd)}">复制</button>` : ''}
+      ${it.link ? `<a class="env-link" href="${esc(it.link.href)}"
+        target="_blank" rel="noreferrer">${esc(it.link.label)}</a>` : ''}
+    </div>`).join('')}
+    <button class="env-x" id="envClose" title="这次先不看了">${icon('i-close')}</button>
+  </div>`;
+  bar.hidden = false;
 }
 
 /* ───────── 启动 ───────── */
@@ -1313,6 +1381,7 @@ function initTheme() {
 async function boot() {
   initTheme();
   bind();
+  checkEnv();                 // 不 await：环境自检慢一点也不该拖住首屏
   // 支持 ?filter=dirty 直达某个筛选（跟 ?theme= 一样，方便收藏和截图）
   const want = new URLSearchParams(location.search).get('filter');
   if (want && NAVS.some((n) => n.id === want)) S.filter = want;
