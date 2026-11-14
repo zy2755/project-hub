@@ -893,13 +893,43 @@ function renderRelHistory(s) {
   box.innerHTML = '<div class="hd">已有的 Release</div>' + s.releases.map((r) => {
     const cls = r.draft ? 'draft' : (r.pre ? 'pre' : 'pub');
     const label = r.draft ? '草稿' : (r.pre ? '预发布' : '已发布');
+    // 草稿才给操作按钮：草稿是个没公开的壳子，需要单独「发布」或干脆删掉
+    const acts = r.draft
+      ? `<button class="rel-mini" data-rel="publish" data-tag="${esc(r.tag)}">发布</button>
+         <button class="rel-mini danger" data-rel="delete" data-tag="${esc(r.tag)}">删除</button>`
+      : '';
     return `<div class="rel-item">
       <span class="tg">${esc(r.tag)}</span>
       <span class="nm">${esc(r.name || '')}</span>
       <span class="stab ${cls}">${label}</span>
       <a href="${esc(r.url)}" target="_blank" rel="noreferrer">查看</a>
+      ${acts}
     </div>`;
   }).join('');
+}
+
+/* 草稿转正式 / 删草稿 —— 不用再开 GitHub 网页 */
+async function relEdit(tag, action) {
+  if (REL.busy) return;
+  const isPub = action === 'publish_draft';
+  if (!isPub && !confirm(`删除草稿 ${tag}？删除后无法恢复。`)) return;
+
+  REL.busy = true;
+  try {
+    const d = await api(`/api/projects/${REL.id}/release`, { action, tag });
+    REL.state = d.state;
+    $('#relNotice').innerHTML = `<div class="rel-notice info">${icon('i-check')}
+      <div>${isPub
+        ? `${esc(tag)} 已正式发布，tag 现在出现在仓库里了`
+        : `草稿 ${esc(tag)} 已删除`}</div></div>`;
+    renderRelHistory(REL.state);
+    await loadState();
+    silentProbe();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    REL.busy = false;
+  }
 }
 
 /* 内置文件浏览器：直接列目录并勾选文件，不走系统对话框 */
@@ -986,7 +1016,7 @@ async function doPublish() {
     // 草稿发布后 GitHub 还没建 tag，得说清楚，不然去仓库里找不到会以为失败了
     const tail = d.state && d.state.releases.find((r) => r.tag === tag);
     const tip = (tail && tail.draft)
-      ? '草稿已创建。到 GitHub 上点 Publish 之后，tag 才会真正出现在仓库里。'
+      ? '草稿已创建（别人暂时看不到）。在下面列表里点「发布」才会公开，tag 也才真正建到仓库里。'
       : '已发布，可以去 GitHub 看了。';
     $('#relNotice').innerHTML = `<div class="rel-notice info">${icon('i-check')}
       <div>${esc(tip)}${d.url ? ` <a href="${esc(d.url)}" target="_blank"
@@ -1223,6 +1253,14 @@ function bind() {
     REL.files.splice(Number(rm.dataset.rm), 1);
     renderRelFiles();
     if (!$('#relPicker').hidden) renderRelPicker();   // 勾选状态跟着变
+  });
+  // 已有 release 里的草稿操作（发布 / 删除），列表是动态渲染的所以用委托
+  $('#relHistory').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rel]');
+    if (!b || b.disabled) return;
+    const tag = b.dataset.tag;
+    if (b.dataset.rel === 'publish') return relEdit(tag, 'publish_draft');
+    if (b.dataset.rel === 'delete') return relEdit(tag, 'delete_draft');
   });
   $('#relAutoZip').addEventListener('change', () => {
     $('#relZipHint').textContent = $('#relAutoZip').checked

@@ -834,6 +834,10 @@ def _gh_error(text: str) -> str:
         return "GitHub 上找不到这个仓库，或者当前账号没有权限访问"
     if "http 403" in low:
         return "没有权限操作这个仓库的 release，确认它属于当前登录的账号"
+    # 必须排在 404 前面：gh 对找不着的 release 只回一句 "release not found"，
+    # 先被 404 那条吃掉的话会说成「仓库不存在」，驴唇不对马嘴
+    if "release not found" in low or "no release" in low:
+        return "GitHub 上找不到这个版本号的 release，可能它已经被删了，刷新面板再看"
     if "already exists" in low:
         return "这个版本号已经有 release 了，换一个，或去 GitHub 上删掉旧的"
     if "tag" in low and ("exist" in low or "invalid" in low):
@@ -1226,6 +1230,48 @@ def release_publish(record: dict, payload: dict) -> dict:
         "renamed": renamed,
         "state": release_state(record),
     }
+
+
+def release_edit(record: dict, payload: dict) -> dict:
+    """
+    对已有的 release 做事：草稿转正式、删掉草稿。
+
+    草稿只是个未公开的壳子，正式发布还得再走一步 —— 本来要跑去 GitHub
+    网页点 Publish，这里直接用 gh 补上，省一次跳转。
+    """
+    path = (record.get("path") or "").strip()
+    if not path or not os.path.isdir(path):
+        return {"ok": False, "error": "本地路径不存在"}
+    slug = _gh_slug(record)
+    if not slug:
+        return {"ok": False, "error": "这个项目还没关联 GitHub 仓库，先在编辑里填上地址"}
+    if not _gh_bin():
+        return {"ok": False, "error": "没检测到 gh 命令行工具，装一个才能操作：https://cli.github.com"}
+
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "没指定版本号"}
+    action = (payload.get("action") or "").strip()
+
+    if action == "publish_draft":
+        # 必须写成 --draft=false：这个开关不给值时默认 true，
+        # 光写 --draft 会把已经是草稿的东西再存一次草稿，看着像没反应
+        code, out, err = _gh_run(
+            path, "release", "edit", tag, "--repo", slug, "--draft=false", timeout=90)
+        done = f"已发布 {tag}"
+    elif action == "delete_draft":
+        code, out, err = _gh_run(
+            path, "release", "delete", tag, "--repo", slug, "--yes", timeout=90)
+        done = f"已删除草稿 {tag}"
+    else:
+        return {"ok": False, "error": f"未知操作：{action}"}
+
+    if code != 0:
+        return {"ok": False, "error": _gh_error(err or out), "state": release_state(record)}
+
+    # 草稿发布后远端才有真 tag，拉回本地让 git tag 也能看到
+    _git_run(path, *_gh_helper_args(), "fetch", "--tags", "--quiet", timeout=60)
+    return {"ok": True, "msg": done, "state": release_state(record)}
 
 
 # ─────────────────────────── 目录扫描 ───────────────────────────
@@ -1906,6 +1952,12 @@ class Handler(BaseHTTPRequestHandler):
                     {"url": res.get("url") or "", "state": res.get("state") or {}},
                     res.get("msg") or "已发布",
                 )
+            if action in ("publish_draft", "delete_draft"):
+                res = release_edit(rec, payload)
+                if not res.get("ok"):
+                    return self._fail(res.get("error") or "操作失败")
+                return self._ok({"state": res.get("state") or {}},
+                                res.get("msg") or "完成")
             return self._fail(f"未知操作：{action}")
 
         if path == "/api/open":

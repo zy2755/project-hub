@@ -1336,6 +1336,32 @@ body {
 }
 .rel-item a:hover { text-decoration: underline; }
 
+/* 草稿那两个小操作：一颗「发布」、一颗「删除」，克制到跟文字一样轻 */
+.rel-item .rel-mini {
+  flex: none;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.rel-item .rel-mini:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.rel-item .rel-mini.danger:hover {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(221, 59, 59, .1);
+}
+.rel-item .rel-mini:disabled { opacity: .5; cursor: default; }
+
 @media (max-width: 720px) {
   .rel-row { flex-direction: column; gap: 10px; }
 }
