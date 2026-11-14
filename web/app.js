@@ -257,10 +257,17 @@ function badgesFor(p) {
 
 function cardHtml(p) {
   const st = p.status || {};
-  const ghLabel = p.github ? 'GitHub' : '关联';
   const commitLine = st.last_commit_msg
     ? `<div class="commit">${icon('i-code', 'ico')}<span>${esc(relTime(st.last_commit_at))} · ${esc(st.last_commit_msg)}</span></div>`
     : (p.description ? `<div class="commit">${esc(p.description)}</div>` : '');
+
+  // 「提交」按钮只在真有事可做时出现 —— 干净的仓库多点一个按钮只会碍事
+  const needsCommit = st.dirty || (st.ahead || 0) > 0;
+  const commitBtn = needsCommit
+    ? `<button class="act commit-cta" data-act="commit" title="${
+        st.dirty ? '提交改动，或推送到 GitHub' : '本地有提交还没推上去'
+      }">${icon('i-commit')}${st.dirty ? '提交' : '推送'}</button>`
+    : '';
 
   return `<article class="card" data-id="${p.id}">
     <div class="card-head">
@@ -276,9 +283,10 @@ function cardHtml(p) {
     <div class="badges">${badgesFor(p)}</div>
     ${commitLine}
     <div class="card-actions">
+      ${commitBtn}
       <button class="act" data-act="folder" title="在资源管理器里打开">${icon('i-folder')}打开</button>
-      <button class="act ${p.github ? '' : 'ghostly'}" data-act="github" title="${p.github || '还没有关联 GitHub 仓库'}">
-        ${icon('i-github')}${ghLabel}</button>
+      <button class="act ${p.github ? '' : 'dim'}" data-act="github"
+        title="${p.github ? '打开 GitHub 仓库' : '还没有关联 GitHub 仓库，点这里补上'}">${icon('i-github')}</button>
       <button class="act" data-act="vscode" title="用 VS Code 打开">${icon('i-code')}Code</button>
       <button class="act ghostly push" data-act="edit" title="编辑">${icon('i-edit')}</button>
       <button class="act ghostly danger" data-act="del" title="从列表移除">${icon('i-trash')}</button>
@@ -536,6 +544,211 @@ function renderPicker() {
   $('#dirList').scrollTop = 0;
 }
 
+/* ───────── 提交与推送面板 ───────── */
+
+const CM = { id: null, detail: null, picked: new Set(), busy: null };
+
+// 状态字母配色，跟 .cm-st.* 对应
+const KIND_CLS = { M: 'm', A: 'a', D: 'd', R: 'r', C: 'c', T: 't', U: 'u', '?': 'q' };
+
+async function openCommit(p) {
+  CM.id = p.id;
+  CM.detail = null;
+  CM.picked = new Set();
+  CM.busy = null;
+  $('#cmTitle').textContent = p.name;
+  $('#cmSub').textContent = p.path || '';
+  $('#cmMsg').value = '';
+  $('#cmRecent').innerHTML = '';
+  $('#cmSync').innerHTML = '<span class="cm-branch">读取中…</span>';
+  $('#cmFilesHead').innerHTML = '';
+  $('#cmFiles').innerHTML = '<div class="cm-empty">正在读取改动…</div>';
+  $('#cmInfo').textContent = '';
+  $('#commitOverlay').hidden = false;
+
+  try {
+    const d = await api(`/api/projects/${p.id}/git`);
+    CM.detail = d;
+    // 默认全选：绝大多数时候就是「把改动都提交了」
+    CM.picked = new Set((d.files || []).map((f) => f.path));
+    renderCommit();
+    setTimeout(() => $('#cmMsg').focus(), 80);
+  } catch (e) {
+    $('#cmFiles').innerHTML = `<div class="cm-empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderCommit() {
+  const d = CM.detail;
+  if (!d) return;
+
+  const hasChanges = (d.files || []).length > 0;
+  // edit=有东西可提交 / sync=只剩推送拉取可做 / error=不是仓库
+  const modal = document.querySelector('.commit-modal');
+  if (modal) modal.dataset.mode = !d.is_git ? 'error' : (hasChanges ? 'edit' : 'sync');
+  const closeBtn = document.querySelector('.modal-foot [data-close-commit]');
+  if (closeBtn) closeBtn.textContent = hasChanges ? '取消' : '关闭';
+
+  if (!d.is_git) {
+    $('#cmSync').innerHTML = '';
+    $('#cmFilesHead').innerHTML = '';
+    $('#cmFiles').innerHTML = `<div class="cm-empty">${icon('i-alert')}
+      <div>${esc(d.error || '这个目录还不是 Git 仓库')}</div></div>`;
+    $('#cmInfo').textContent = '';
+    setCommitButtons(false);
+    return;
+  }
+
+  renderSync(d);
+  renderFiles(d);
+  renderRecent(d);
+
+  const n = CM.picked.size;
+  $('#cmHint').textContent = n ? `将提交 ${n} 个文件` : '';
+  // 没配用户名的话提交必定失败，提前说清楚，别让人写完一大段话才看到报错
+  const noId = !d.identity || !d.identity.name;
+  $('#cmInfo').textContent = noId ? '没配置 Git 用户名，提交会失败' : '';
+  setCommitButtons(n > 0 && !CM.busy);
+}
+
+function renderSync(d) {
+  const busy = CM.busy;
+  const out = [`<span class="cm-branch" title="当前分支 / 上游：${esc(d.upstream || '未设置')}">
+    ${icon('i-commit')}${esc(d.branch || '未知')}</span>`];
+
+  if (d.detached) out.push('<span class="badge warn">游离 HEAD</span>');
+  if (d.ahead > 0) out.push(`<span class="badge info">↑ 待推送 ${d.ahead}</span>`);
+  if (d.behind > 0) out.push(`<span class="badge info">↓ 待拉取 ${d.behind}</span>`);
+  if (!d.upstream && !d.detached) out.push('<span class="badge">还没有上游</span>');
+
+  // 没上游时也允许推 —— 那正是「首次推送，顺便建立跟踪」
+  const canPull = d.has_upstream && !d.detached && !busy;
+  const canPush = !d.detached && !busy && (d.ahead > 0 || !d.has_upstream);
+
+  out.push('<span class="grow"></span>');
+  out.push(`<button class="btn sm" id="cmPull" ${canPull ? '' : 'disabled'}>${icon('i-down')}${
+    busy === 'pull' ? '拉取中…' : '拉取'}</button>`);
+  out.push(`<button class="btn sm" id="cmPush" ${canPush ? '' : 'disabled'}>${icon('i-up')}${
+    busy === 'push' ? '推送中…' : (d.ahead > 0 ? `推送 ${d.ahead}` : '推送')}</button>`);
+
+  $('#cmSync').innerHTML = out.join('');
+}
+
+function renderFiles(d) {
+  const box = $('#cmFiles');
+  const sc = box.scrollTop;   // 勾选后会重画，把滚动位置接回来
+  const files = d.files || [];
+
+  if (!files.length) {
+    $('#cmFilesHead').innerHTML = '';
+    box.innerHTML = `<div class="cm-empty">${icon('i-check')}
+      <div>工作区是干净的<br>没有待提交的改动</div></div>`;
+    return;
+  }
+
+  const allOn = CM.picked.size === files.length;
+  $('#cmFilesHead').innerHTML = `
+    <label class="all"><input type="checkbox" id="cmAll" ${allOn ? 'checked' : ''}>全选</label>
+    <span class="sum">${CM.picked.size}/${files.length} 个文件 ·
+      <b class="add">+${d.stat.add}</b> <b class="del">−${d.stat.del}</b></span>`;
+
+  box.innerHTML = files.map((f) => {
+    const on = CM.picked.has(f.path);
+    const cls = KIND_CLS[f.kind] || 'm';
+    const num = [
+      f.add ? `<i class="add">+${f.add}</i>` : (f.untracked ? '<i class="add">新增</i>' : ''),
+      f.del ? `<i class="del">−${f.del}</i>` : '',
+    ].filter(Boolean).join('');
+    return `<label class="cm-file ${on ? '' : 'off'}" title="${esc(f.label)}：${esc(f.path)}">
+      <input type="checkbox" data-file="${esc(f.path)}" ${on ? 'checked' : ''}>
+      <span class="cm-st ${cls}" title="${esc(f.label)}${f.staged ? '（已暂存）' : ''}">${esc(f.kind)}</span>
+      <span class="cm-fp">${esc(f.path)}</span>
+      <span class="cm-num">${num}</span>
+    </label>`;
+  }).join('');
+
+  box.scrollTop = sc;
+}
+
+function renderRecent(d) {
+  // 最近几条提交只用来「照抄格式」，点一下填进输入框
+  const rs = (d.recent || []).slice(0, 4);
+  $('#cmRecent').innerHTML = rs.map((r) =>
+    `<button data-msg="${esc(r.msg)}" title="点一下填入：${esc(r.msg)}">${esc(r.msg)}</button>`).join('');
+}
+
+function setCommitButtons(on) {
+  const busy = CM.busy;
+  $('#cmCommit').disabled = !on || !!busy;
+  $('#cmCommitPush').disabled = !on || !!busy;
+  $('#cmCommit').textContent = busy === 'commit' ? '提交中…' : '仅提交';
+  $('#cmCommitPush').textContent = busy === 'commitpush' ? '提交并推送中…' : '提交并推送';
+}
+
+async function runCommit(push) {
+  const d = CM.detail;
+  if (!d || CM.busy) return;
+
+  const msg = $('#cmMsg').value.trim();
+  if (!msg) {
+    $('#cmMsg').focus();
+    return toast('先写一句提交信息', true);
+  }
+  if (!CM.picked.size) return toast('至少勾选一个文件', true);
+
+  CM.busy = push ? 'commitpush' : 'commit';
+  renderCommit();   // 先把按钮置灰，免得手快连点两次提示「没有可提交的改动」
+
+  try {
+    const res = await api(`/api/projects/${CM.id}/git`, {
+      action: 'commit',
+      message: msg,
+      files: [...CM.picked],
+      push,
+    });
+    if (res.error) {
+      // 提交成功了、只是推送失败：本地提交是留着的，得说清楚，别让人以为白干
+      toast(res.error, true);
+      CM.detail = res.detail;
+      CM.picked = new Set((res.detail.files || []).map((f) => f.path));
+    } else {
+      $('#commitOverlay').hidden = true;   // 成功提示由 api() 统一弹
+    }
+    await loadState();
+    silentProbe();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    CM.busy = null;
+    if (!$('#commitOverlay').hidden) renderCommit();
+  }
+}
+
+async function runSync(action) {
+  if (CM.busy || !CM.detail) return;
+  const before = CM.detail.files || [];
+  const wasAll = CM.picked.size === before.length;   // 用户是全选状态吗
+
+  CM.busy = action;
+  renderCommit();
+
+  try {
+    const res = await api(`/api/projects/${CM.id}/git`, { action });
+    const next = res.detail.files || [];
+    CM.detail = res.detail;
+    // 拉取可能带来新文件：全选的继续保持全选，部分选择的按原样过滤
+    CM.picked = wasAll
+      ? new Set(next.map((f) => f.path))
+      : new Set([...CM.picked].filter((p) => next.some((f) => f.path === p)));
+    await loadState();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    CM.busy = null;
+    renderCommit();
+  }
+}
+
 /* ───────── 事件绑定 ───────── */
 
 function bind() {
@@ -588,6 +801,7 @@ function bind() {
 
     if (act === 'folder' || act === 'vscode') return doOpen(p.id, act);
     if (act === 'github') return p.github ? doOpen(p.id, 'github') : openForm(p);
+    if (act === 'commit') return openCommit(p);
     if (act === 'edit') return openForm(p);
     if (act === 'del') return removeProject(p);
     if (act === 'fav') return toggleFav(p);
@@ -658,9 +872,48 @@ function bind() {
   // 弹窗关闭
   $$('[data-close]').forEach((b) => b.addEventListener('click', () => { $('#formOverlay').hidden = true; }));
   $$('[data-close-scan]').forEach((b) => b.addEventListener('click', () => { $('#scanOverlay').hidden = true; }));
+  $$('[data-close-commit]').forEach((b) => b.addEventListener('click', () => { $('#commitOverlay').hidden = true; }));
   $$('.overlay').forEach((ov) => ov.addEventListener('click', (e) => {
     if (e.target === ov) ov.hidden = true;
   }));
+
+  // 提交面板：勾选文件
+  $('#cmFiles').addEventListener('change', (e) => {
+    const cb = e.target.closest('input[data-file]');
+    if (!cb) return;
+    if (cb.checked) CM.picked.add(cb.dataset.file);
+    else CM.picked.delete(cb.dataset.file);
+    renderCommit();
+  });
+  $('#cmFilesHead').addEventListener('change', (e) => {
+    if (e.target.id !== 'cmAll') return;
+    const files = CM.detail?.files || [];
+    CM.picked = e.target.checked ? new Set(files.map((f) => f.path)) : new Set();
+    renderCommit();
+  });
+  // 拉取 / 推送按钮是动态渲染的，用委托
+  $('#cmSync').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    if (b.id === 'cmPull') return runSync('pull');
+    if (b.id === 'cmPush') return runSync('push');
+  });
+  // 点最近提交 = 把那条信息填进输入框
+  $('#cmRecent').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-msg]');
+    if (!b) return;
+    $('#cmMsg').value = b.dataset.msg;
+    $('#cmMsg').focus();
+  });
+  $('#cmCommit').addEventListener('click', () => runCommit(false));
+  $('#cmCommitPush').addEventListener('click', () => runCommit(true));
+  $('#cmMsg').addEventListener('keydown', (e) => {
+    // Ctrl/Cmd + Enter 一路提交并推送，写代码的人习惯这个手感
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      runCommit(true);
+    }
+  });
 
   // 快捷键
   document.addEventListener('keydown', (e) => {
@@ -669,6 +922,7 @@ function bind() {
       $('#formOverlay').hidden = true;
       $('#scanOverlay').hidden = true;
       $('#pickerOverlay').hidden = true;
+      $('#commitOverlay').hidden = true;
     }
     if (typing) return;
     if (e.key === '/') { e.preventDefault(); $('#q').focus(); }

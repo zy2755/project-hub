@@ -30,6 +30,9 @@
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-repo" viewBox="0 0 24 24"><circle cx="7" cy="6" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="18" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 8.4v7.2M9.4 6h4.2a1.4 1.4 0 0 1 1.4 1.4v2.2M9.4 18h2.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.6 20.4 19H3.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 9.8v4.1M12 16.6v.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-commit" viewBox="0 0 24 24"><path d="M12 2.5v6M12 15.5v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.6 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></symbol>
 </svg>
 
 <div class="app">
@@ -188,6 +191,40 @@
     <div class="modal-foot">
       <button class="btn" data-close-picker>取消</button>
       <button class="btn primary" id="pickConfirm">选择此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<!-- ───── 提交 / 推送弹窗 ───── -->
+<div class="overlay" id="commitOverlay" hidden>
+  <div class="modal commit-modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <div class="cm-head">
+        <h2 id="cmTitle">提交与推送</h2>
+        <div class="cm-sub" id="cmSub"></div>
+      </div>
+      <button class="icon-btn" data-close-commit><svg class="ico"><use href="#i-close"></use></svg></button>
+    </div>
+
+    <div class="commit-body">
+      <div class="cm-sync" id="cmSync"></div>
+      <div id="cmFilesHead"></div>
+      <div class="cm-files" id="cmFiles"></div>
+      <div class="cm-msg">
+        <div class="cm-msg-head">
+          <label for="cmMsg">提交信息</label>
+          <span id="cmHint"></span>
+        </div>
+        <textarea id="cmMsg" rows="3" placeholder="这次改了什么？例如：修复首屏白屏问题" spellcheck="false"></textarea>
+        <div class="cm-recent" id="cmRecent"></div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <span class="grow" id="cmInfo"></span>
+      <button class="btn" data-close-commit>取消</button>
+      <button class="btn" id="cmCommit">仅提交</button>
+      <button class="btn primary" id="cmCommitPush">提交并推送</button>
     </div>
   </div>
 </div>

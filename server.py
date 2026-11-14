@@ -21,6 +21,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -338,6 +339,427 @@ def probe_many(records: list[dict], workers: int = 8) -> dict[str, dict]:
             except Exception as exc:  # noqa: BLE001
                 out[pid] = {"error": str(exc), "checked_at": time.time()}
     return out
+
+
+# ─────────────────────── Git 写操作：提交 / 推送 / 拉取 ───────────────────────
+#
+# 这一段的每处「多此一举」都是有原因的，改之前先看注释：
+#
+# 1. 所有联网命令都设了 GIT_TERMINAL_PROMPT=0。git 需要账号密码时会去读终端，
+#    而我们的进程根本没有终端 —— 它会一直等下去，接口就永远不返回。
+#    设成 0 后它立刻失败返回，我们就能把「需要凭据」翻译成人话告诉用户。
+# 2. 提交/推送必须拿到 stderr 才能说清失败原因（_git() 只回 stdout，不够用）。
+# 3. 文件列表不信任前端传来的内容，一律先用 git status 重新读一遍再求交集，
+#    否则一个构造出来的 "../../.ssh" 就能让 git add 到仓库外面去。
+
+# porcelain 状态字符 → 中文说明
+_ST_KIND = {
+    "M": "修改",
+    "A": "新增",
+    "D": "删除",
+    "R": "重命名",
+    "C": "复制",
+    "T": "类型变更",
+    "U": "冲突",
+    "?": "未跟踪",
+}
+
+
+def _git_env() -> dict:
+    """给 git 子进程准备环境：禁用一切交互式等待。"""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"   # 不要问凭据，直接失败
+    env["GIT_EDITOR"] = "true"         # 万不得已要拉编辑器时直接放行，别卡住
+    env["GIT_SEQUENCE_EDITOR"] = "true"
+    env["GIT_PAGER"] = "cat"
+    env.pop("GIT_ASKPASS", None)
+    return env
+
+
+def _git_run(repo: str, *args: str, timeout: int = 60) -> tuple[int, str, str]:
+    """执行 git，返回 (返回码, stdout, stderr)。超时返回 124。"""
+    if not repo or not os.path.isdir(repo):
+        return 127, "", "路径不存在"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True, timeout=timeout, env=_git_env(), **NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"命令超过 {timeout} 秒没返回"
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", str(exc)
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8", "replace"),
+        proc.stderr.decode("utf-8", "replace"),
+    )
+
+
+_GH_HELPER: list[str] | None = None
+_GH_CHECKED = False
+
+
+def _gh_helper_args() -> list[str]:
+    """
+    借用 gh CLI 里已经存好的 token 当凭据，**只对这一次命令生效**。
+
+    为什么不干脆帮用户跑 `gh auth setup-git`：那会写进他的全局 ~/.gitconfig，
+    而我们只是他机器上的一个工具，没理由替他改全局配置。
+    找不到 gh 或没登录时返回空列表，git 就退回默认行为。
+    """
+    global _GH_HELPER, _GH_CHECKED
+    if _GH_CHECKED:
+        return _GH_HELPER or []
+    _GH_CHECKED = True
+
+    gh = shutil.which("gh")
+    if not gh:
+        for cand in (
+            r"C:\Program Files\GitHub CLI\gh.exe",
+            r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe"),
+        ):
+            if os.path.isfile(cand):
+                gh = cand
+                break
+    if not gh:
+        return []
+
+    # 路径里有空格，必须用单引号裹住 —— 这段字符串会被 git 交给 sh 执行
+    posix = gh.replace("\\", "/")
+    _GH_HELPER = [
+        "-c", "credential.helper=",
+        "-c", f"credential.https://github.com.helper=!'{posix}' auth git-credential",
+    ]
+    return _GH_HELPER
+
+
+def _tail(text: str, lines: int = 2) -> str:
+    """
+    取错误信息最后几行 —— git 的真正原因通常在末尾。
+
+    用空格而不是换行拼：这段话最终会进 toast，而 toast 是单行的，
+    换行符在那里会变成一块糊在一起的文字。
+    """
+    body = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return " ".join(body[-lines:]) if body else ""
+
+
+def _friendly_git_error(text: str) -> str:
+    """把 git 的英文报错翻成能照着做的中文。"""
+    raw = _tail(text)
+    low = (text or "").lower()
+    if any(k in low for k in ("could not read username", "terminal prompts disabled",
+                              "authentication failed", "invalid username or password")):
+        return "需要 GitHub 凭据。在终端执行一次 gh auth setup-git，或配置 credential.helper 后再试。"
+    if any(k in low for k in ("could not resolve host", "connection timed out", "failed to connect",
+                              "network is unreachable", "connection reset", "operation timed out")):
+        return "连不上 GitHub。检查网络，或确认代理可用（git config --global http.proxy）。"
+    if "repository not found" in low or "does not appear to be a git repository" in low:
+        return "GitHub 上找不到这个仓库。确认登记地址有没有写错、仓库是否已删除，或当前账号有没有访问权限。"
+    if "nothing to commit" in low or "no changes added" in low:
+        return "选中的文件没有可提交的改动"
+    if "please tell me who you are" in low or "unable to auto-detect email" in low:
+        return "还没配置 Git 用户名/邮箱：git config --global user.name \"你的名字\""
+    if "unmerged" in low or "needs merge" in low:
+        return "有文件处于冲突未解决状态，先在编辑器里解决冲突再提交"
+    if any(k in low for k in ("rejected", "non-fast-forward", "fetch first", "updates were rejected")):
+        return "远程有你本地没有的提交，先点「拉取」再推送"
+    if "permission denied" in low or "403" in low:
+        return "没有推送权限，确认这个仓库属于当前 GitHub 账号"
+    if "not a git repository" in low:
+        return "这个目录不是 Git 仓库"
+    return (raw[:200] + "…") if len(raw) > 200 else (raw or "未知错误")
+
+
+def _parse_status_z(raw: str) -> list[tuple[str, str, bool]]:
+    """
+    解析 `git status --porcelain -z` 的输出，返回 [(状态字符, 路径, 是否已暂存)]。
+
+    为什么用 -z：默认输出会把中文路径转义成 "\\344\\270\\255" 这种八进制，
+    既难显示也没法直接拿去 git add。-z 用 \\0 分隔，原样给 UTF-8，一步到位。
+
+    状态码是两列：第一列=暂存区相对上次提交，第二列=工作区相对暂存区。
+    ` M` 是"改了没 stage"，`M ` 是"stage 了没 commit" —— 别混。
+    """
+    out: list[tuple[str, str, bool]] = []
+    parts = raw.split("\0")
+    i = 0
+    while i < len(parts):
+        ent = parts[i]
+        i += 1
+        if not ent or len(ent) < 4:
+            continue
+        xy, fp = ent[:2], ent[3:]
+        # 重命名/复制会多跟一个原始路径，跳过它（我们加了 --no-renames，正常不会出现）
+        if xy[0] in "RC" or xy[1] in "RC":
+            i += 1
+        if xy == "??":
+            out.append(("?", fp, False))
+        elif "U" in xy or xy in ("AA", "DD"):
+            out.append(("U", fp, True))
+        else:
+            ch = xy[0] if xy[0] != " " else xy[1]
+            out.append((ch if ch in _ST_KIND else "M", fp, xy[0] != " "))
+    return out
+
+
+def _numstat(repo: str, *args: str) -> dict[str, tuple[int, int]]:
+    """取每个文件的新增/删除行数。--no-renames 让 -z 的格式变简单，重命名按删+增算。"""
+    code, out, _ = _git_run(repo, "diff", "--numstat", "-z", "--no-renames", *args, timeout=25)
+    res: dict[str, tuple[int, int]] = {}
+    if code != 0:
+        return res
+    for rec in out.split("\0"):
+        if not rec:
+            continue
+        seg = rec.split("\t")
+        if len(seg) < 3:
+            continue
+        add, dele, fp = seg[0], seg[1], seg[2]
+        # 二进制文件的增删是 "-"，按 0 算
+        res[fp] = (int(add) if add.isdigit() else 0, int(dele) if dele.isdigit() else 0)
+    return res
+
+
+def _count_new_lines(path: str, limit: int = 512 * 1024) -> int:
+    """
+    数一个未跟踪文件有多少行，用于显示 "+N"。
+
+    git diff 看不到未跟踪文件，所以这部分得自己数。超过 512KB 或看着像二进制
+    就返回 0 —— 面板是用来扫一眼的，不值得为一个 20MB 的日志卡住三秒。
+    """
+    try:
+        if os.path.getsize(path) > limit:
+            return 0
+        with open(path, "rb") as f:
+            head = f.read(8192)
+            if b"\0" in head:
+                return 0
+            f.seek(0)
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def git_detail(record: dict) -> dict:
+    """
+    打开提交面板时要的全部信息：改动文件、行数、分支、领先/落后、最近提交。
+    一次请求凑齐，避免前端连打好几个接口。
+    """
+    path = (record.get("path") or "").strip()
+    info: dict = {
+        "is_git": False,
+        "branch": None,
+        "detached": False,
+        "has_upstream": False,
+        "upstream": None,
+        "ahead": 0,
+        "behind": 0,
+        "remote": None,
+        "files": [],
+        "stat": {"files": 0, "add": 0, "del": 0},
+        "recent": [],
+        "identity": {"name": "", "email": ""},
+        "error": None,
+    }
+
+    if not path or not os.path.isdir(path):
+        info["error"] = "本地路径不存在"
+        return info
+    if not os.path.exists(os.path.join(path, ".git")):
+        info["error"] = "这个目录还不是 Git 仓库"
+        return info
+    info["is_git"] = True
+
+    branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD", timeout=8) or ""
+    info["branch"] = branch or None
+    info["detached"] = branch == "HEAD"
+
+    info["upstream"] = _git(path, "rev-parse", "--abbrev-ref", "@{u}", timeout=8) or None
+    info["has_upstream"] = bool(info["upstream"])
+    counts = _git(path, "rev-list", "--left-right", "--count", "@{u}...HEAD", timeout=10)
+    if counts:
+        parts = counts.split()
+        if len(parts) == 2:
+            info["behind"], info["ahead"] = int(parts[0]), int(parts[1])
+
+    info["remote"] = _git(path, "config", "--get", "remote.origin.url", timeout=6) \
+        or read_remote_from_config(path)
+
+    info["identity"] = {
+        "name": _git(path, "config", "user.name", timeout=6) or "",
+        "email": _git(path, "config", "user.email", timeout=6) or "",
+    }
+
+    # ── 改动文件 ──
+    code, out, err = _git_run(
+        path, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", timeout=25)
+    if code != 0:
+        info["error"] = _friendly_git_error(err or out)
+        return info
+
+    pairs = _parse_status_z(out)
+    work = _numstat(path)              # 工作区 vs 暂存区
+    staged = _numstat(path, "--cached")  # 暂存区 vs 上次提交
+
+    files = []
+    total_add = total_del = 0
+    for kind, fp, is_staged in pairs:
+        if kind == "?":
+            # 未跟踪文件不在 diff 里，行数自己数
+            add, dele = _count_new_lines(os.path.join(path, fp)), 0
+        else:
+            a1, d1 = work.get(fp, (0, 0))
+            a2, d2 = staged.get(fp, (0, 0))
+            add, dele = a1 + a2, d1 + d2
+        total_add += add
+        total_del += dele
+        files.append({
+            "path": fp,
+            "kind": kind,
+            "label": _ST_KIND.get(kind, "改动"),
+            "add": add,
+            "del": dele,
+            "untracked": kind == "?",
+            "staged": is_staged,
+        })
+    # 有冲突的排最前，其余按路径，扫一眼就知道哪些要先处理
+    files.sort(key=lambda f: (0 if f["kind"] == "U" else 1, f["path"].lower()))
+    info["files"] = files
+    info["stat"] = {"files": len(files), "add": total_add, "del": total_del}
+
+    # ── 最近提交，写提交信息时可以照着风格来 ──
+    code, out, _ = _git_run(path, "log", "-6", "--format=%h%x1f%cI%x1f%an%x1f%s", timeout=10)
+    if code == 0 and out:
+        recent = []
+        for line in out.splitlines():
+            seg = line.split("\x1f")
+            if len(seg) >= 4:
+                recent.append({"hash": seg[0], "at": seg[1], "author": seg[2], "msg": seg[3]})
+        info["recent"] = recent
+
+    return info
+
+
+def git_commit(record: dict, message: str, files=None, push: bool = False) -> dict:
+    """
+    提交（可选顺带推送）。
+
+    勾选语义：勾了哪些文件，这次就只提交哪些。
+    为此在「只勾了一部分」时会先 `git reset` 清空暂存区 —— 否则你手动 stage 过的
+    其他文件会被一起带进这次提交。reset 只动暂存区不动工作区，文件内容不会丢。
+    """
+    path = (record.get("path") or "").strip()
+    msg = (message or "").strip()
+    if not msg:
+        return {"ok": False, "error": "先写一句提交信息"}
+    if not path or not os.path.isdir(path):
+        return {"ok": False, "error": "本地路径不存在"}
+
+    detail = git_detail(record)
+    if not detail["is_git"]:
+        return {"ok": False, "error": detail["error"] or "不是 Git 仓库"}
+
+    existing = {f["path"] for f in detail["files"]}
+    if isinstance(files, list) and files:
+        picked = {str(f) for f in files} & existing   # 只认仓库里真实存在的改动
+    else:
+        picked = set(existing)
+    if not picked:
+        return {"ok": False, "error": "没有可提交的改动"}
+
+    if len(picked) < len(existing):
+        # 部分提交：清空暂存区，保证「勾了什么就提交什么」。首次提交时没有 HEAD，
+        # reset 会报错，忽略即可（那时暂存区本来就是空的）。
+        _git_run(path, "reset", "-q", "--mixed", timeout=25)
+
+    if len(picked) == len(existing):
+        code, out, err = _git_run(path, "add", "-A", timeout=90)
+    else:
+        # `--` 明确告诉 git 后面都是路径，防止文件名被当成选项
+        code, out, err = _git_run(path, "add", "--", *sorted(picked), timeout=90)
+    if code != 0:
+        return {"ok": False, "error": "暂存失败：" + _friendly_git_error(err or out)}
+
+    code, out, err = _git_run(path, "commit", "-m", msg, timeout=180)
+    if code != 0:
+        return {"ok": False, "error": _friendly_git_error(err or out)}
+
+    # 提交成功。如果还要推送，就接着推 —— 推失败时提交是留着的，要如实告诉用户
+    result = {"ok": True, "msg": f"已提交 {len(picked)} 个文件", "error": "", "pushed": False}
+    if push:
+        pr = git_push(record)
+        result["pushed"] = pr["ok"]
+        if pr["ok"]:
+            result["msg"] = f"已提交并推送 {len(picked)} 个文件"
+        else:
+            result["error"] = "提交成功，但推送失败：" + pr["error"]
+    result["detail"] = git_detail(record)
+    return result
+
+
+def git_push(record: dict) -> dict:
+    """推送到远程。没有 upstream 时自动 -u origin <当前分支>。"""
+    path = (record.get("path") or "").strip()
+    if not path or not os.path.isdir(path):
+        return {"ok": False, "error": "本地路径不存在"}
+
+    branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD", timeout=8) or ""
+    if not branch:
+        return {"ok": False, "error": "读不到当前分支"}
+    if branch == "HEAD":
+        return {"ok": False, "error": "当前处于游离 HEAD 状态，没有可推送的分支"}
+
+    has_up = bool(_git(path, "rev-parse", "--abbrev-ref", "@{u}", timeout=8))
+    args = ["push"] if has_up else ["push", "-u", "origin", branch]
+
+    # 180 秒：走代理的大仓库首次推送可能要一会儿，但也不能无限等
+    code, out, err = _git_run(path, *_gh_helper_args(), *args, timeout=180)
+    if code == 0:
+        up_to_date = any(
+            k in (out + err) for k in ("Everything up-to-date", "Everything up to date"))
+        if up_to_date:
+            result = {"ok": True, "msg": "没有需要推送的提交", "error": ""}
+        else:
+            result = {
+                "ok": True,
+                "msg": f"已推送到 {branch}" + ("" if has_up else "（已设为上游）"),
+                "error": "",
+            }
+    else:
+        result = {"ok": False, "error": _friendly_git_error(err or out)}
+    result["detail"] = git_detail(record)
+    return result
+
+
+def git_pull(record: dict) -> dict:
+    """
+    拉取远程更新。只做快进（--ff-only）：
+    真需要合并时交给用户在编辑器里处理，这里要是自动 merge，出了冲突
+    就会留下一堆 <<<<<<< 在文件里，界面又帮不上忙，反而更糟。
+    """
+    path = (record.get("path") or "").strip()
+    if not path or not os.path.isdir(path):
+        return {"ok": False, "error": "本地路径不存在"}
+    if not _git(path, "rev-parse", "--abbrev-ref", "@{u}", timeout=8):
+        return {"ok": False, "error": "这个分支还没有上游，先推送一次建立跟踪关系"}
+
+    code, out, err = _git_run(path, *_gh_helper_args(), "pull", "--ff-only", timeout=180)
+    if code != 0:
+        raw = err or out
+        if "not possible to fast-forward" in raw.lower() or "diverging" in raw.lower():
+            why = "本地和远程各有新提交，不能自动快进，需要在终端手动合并"
+        else:
+            why = _friendly_git_error(raw)
+        result = {"ok": False, "error": why}
+    else:
+        changed = "已经是最新的" if "Already up to date" in (out + err) or "Already up-to-date" in (out + err) \
+            else "已拉取更新"
+        result = {"ok": True, "msg": changed, "error": ""}
+    result["detail"] = git_detail(record)
+    return result
 
 
 # ─────────────────────────── 目录扫描 ───────────────────────────
@@ -866,6 +1288,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._ok(state_payload(probe=probe))
         if path == "/api/ping":
             return self._ok({"app": APP_NAME, "pid": os.getpid()})
+        m = re.fullmatch(r"/api/projects/([0-9a-f]+)/git", path)
+        if m:
+            rec = find_project(m.group(1))
+            if not rec:
+                return self._fail("项目不存在", 404)
+            return self._ok(git_detail(rec))
         return self._fail("未知接口", 404)
 
     def _api_post(self, path: str, patched: bool = False) -> None:
@@ -899,6 +1327,36 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/probe-all":
             return self._ok(state_payload(probe=True))
+
+        # 提交 / 推送 / 拉取：一个入口，用 action 区分
+        m = re.fullmatch(r"/api/projects/([0-9a-f]+)/git", path)
+        if m:
+            rec = find_project(m.group(1))
+            if not rec:
+                return self._fail("项目不存在", 404)
+            action = (payload.get("action") or "").strip()
+            if action == "detail":
+                return self._ok(git_detail(rec))
+            if action == "commit":
+                res = git_commit(
+                    rec,
+                    payload.get("message") or "",
+                    payload.get("files"),
+                    bool(payload.get("push")),
+                )
+            elif action == "push":
+                res = git_push(rec)
+            elif action == "pull":
+                res = git_pull(rec)
+            else:
+                return self._fail("未知操作：" + (action or "（空）"))
+
+            # 状态变了，顺手刷新缓存 —— 卡片上的徽章不用等下一次全量探测
+            _PROBE_CACHE[rec["id"]] = probe_project(rec)
+            if not res.get("ok"):
+                return self._fail(res.get("error") or "操作失败")
+            # 注意：提交成功但推送失败时 ok=True 而 error 有值，前端要能看到这段
+            return self._ok(res, res.get("msg") or "")
 
         if path == "/api/scan":
             root = (payload.get("root") or "").strip()

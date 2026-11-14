@@ -269,6 +269,8 @@ body {
   box-shadow: 0 3px 10px rgba(79, 70, 229, .25);
 }
 .btn.primary:hover { filter: brightness(1.07); }
+/* 深色主题下 --accent 是浅紫，白字压不住，换成深字 */
+[data-theme="dark"] .btn.primary { color: #14161f; }
 .btn.sm { height: 32px; padding: 0 11px; font-size: 12.5px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 
@@ -474,6 +476,7 @@ body {
 
 .card-actions {
   display: flex;
+  flex-wrap: wrap;        /* 按钮多到放不下时整行换，不要压扁 */
   gap: 5px;
   padding-top: 10px;
   border-top: 1px solid var(--line-soft);
@@ -493,14 +496,29 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  flex: none;             /* 不参与收缩，否则会被挤到文字换行 */
+  white-space: nowrap;
   transition: all .13s;
 }
 .act:hover { background: var(--accent-bg); color: var(--accent); border-color: transparent; }
 .act.danger:hover { background: rgba(221, 59, 59, .09); color: var(--red); }
 .act.ghostly { border-color: transparent; color: var(--text-3); }
 .act.ghostly:hover { border-color: transparent; background: var(--line-soft); color: var(--text); }
+/* 没关联仓库时 GitHub 图标淡一点，提示这里还能点（点开是补地址） */
+.act.dim { opacity: .38; }
+.act.dim:hover { opacity: 1; }
 .act .ico { width: 13px; height: 13px; }
 .act.push { margin-left: auto; }
+
+/* 只在有改动 / 待推送时出现的「提交」按钮，给它一点存在感 */
+.act.commit-cta {
+  border-color: transparent;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+.act.commit-cta:hover { background: var(--accent); color: var(--card); }
+.act.commit-cta .ico { color: currentColor; }
 
 /* ───────── 空状态 ───────── */
 
@@ -643,6 +661,218 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ───────── 提交 / 推送面板 ───────── */
+
+.commit-modal { width: min(660px, 100%); }
+
+.cm-head { min-width: 0; }
+.cm-sub {
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.commit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 18px 14px;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.cm-sync {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 11px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 42px;
+}
+.cm-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 650;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  color: var(--text);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-branch .ico { width: 13px; height: 13px; color: var(--text-3); }
+.cm-sync .grow { margin-left: auto; }
+.cm-sync .btn { height: 27px; padding: 0 10px; font-size: 12px; }
+
+/* 文件区：表头固定、列表自己滚 */
+.cm-files-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.cm-files-head .all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  flex: none;
+}
+.cm-files-head .all input { width: 14px; height: 14px; accent-color: var(--accent); }
+.cm-files-head .sum { margin-left: auto; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cm-files-head .sum b { font-weight: 650; }
+.cm-files-head .sum .add { color: var(--green); }
+.cm-files-head .sum .del { color: var(--red); }
+
+.cm-files {
+  flex: 1;
+  min-height: 96px;
+  max-height: 42vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.cm-file {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 11px;
+  font-size: 12.6px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+  transition: background .12s;
+}
+.cm-file:last-child { border-bottom: none; }
+.cm-file:hover { background: var(--bg); }
+.cm-file input { width: 14px; height: 14px; accent-color: var(--accent); flex: none; }
+.cm-file.off .cm-fp { color: var(--text-3); text-decoration: line-through; }
+.cm-file.off .cm-st { opacity: .45; }
+
+/* 状态字母：M 改 / A 增 / D 删 / U 冲突 / ? 未跟踪 */
+.cm-st {
+  width: 17px;
+  flex: none;
+  text-align: center;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  border-radius: 5px;
+  line-height: 17px;
+}
+.cm-st.m { color: var(--amber); background: rgba(217, 129, 0, .12); }
+.cm-st.a { color: var(--green); background: rgba(15, 157, 99, .12); }
+.cm-st.d { color: var(--red);   background: rgba(221, 59, 59, .1); }
+.cm-st.u { color: var(--red);   background: rgba(221, 59, 59, .16); }
+.cm-st.q { color: var(--blue);  background: rgba(47, 111, 237, .1); }
+.cm-st.r,
+.cm-st.c,
+.cm-st.t { color: var(--text-2); background: var(--line-soft); }
+
+.cm-fp {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--text-2);
+  direction: ltr;
+}
+.cm-num {
+  flex: none;
+  display: flex;
+  gap: 7px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+.cm-num .add { color: var(--green); font-style: normal; }
+.cm-num .del { color: var(--red); font-style: normal; }
+
+.cm-msg { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.cm-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.cm-msg-head span { margin-left: auto; font-weight: 400; font-size: 11.5px; color: var(--text-3); }
+.cm-msg textarea {
+  width: 100%;
+  resize: none;
+  min-height: 66px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  outline: none;
+  transition: border-color .14s, background .14s;
+}
+.cm-msg textarea:focus { border-color: var(--accent); background: var(--card); }
+.cm-msg textarea::placeholder { color: var(--text-3); }
+
+.cm-recent { display: flex; gap: 5px; flex-wrap: wrap; }
+.cm-recent:empty { display: none; }
+.cm-recent button {
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text-2);
+  cursor: pointer;
+  max-width: calc(50% - 3px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-recent button:hover { border-color: var(--accent); color: var(--accent); }
+
+.cm-empty {
+  padding: 30px 16px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.cm-empty .ico { width: 26px; height: 26px; margin: 0 auto 8px; color: var(--green); }
+
+/* 干净 / 非仓库时把「不能用的东西」收起来，别摆一堆点不动的按钮 */
+.commit-modal[data-mode="sync"] .cm-msg,
+.commit-modal[data-mode="sync"] #cmCommit,
+.commit-modal[data-mode="sync"] #cmCommitPush,
+.commit-modal[data-mode="error"] .cm-msg,
+.commit-modal[data-mode="error"] #cmCommit,
+.commit-modal[data-mode="error"] #cmCommitPush { display: none; }
+.commit-modal[data-mode="sync"] .cm-files,
+.commit-modal[data-mode="error"] .cm-files {
+  flex: none;
+  min-height: 0;
+  max-height: none;
 }
 
 /* ───────── 目录选择器 ───────── */
