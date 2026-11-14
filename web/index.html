@@ -33,6 +33,9 @@
   <symbol id="i-commit" viewBox="0 0 24 24"><path d="M12 2.5v6M12 15.5v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.6 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M11.6 3.5H5.2A1.7 1.7 0 0 0 3.5 5.2v6.4c0 .45.18.88.5 1.2l8.1 8.1a1.7 1.7 0 0 0 2.4 0l6.4-6.4a1.7 1.7 0 0 0 0-2.4l-8.1-8.1a1.7 1.7 0 0 0-1.2-.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="7.6" cy="7.6" r="1.35" fill="currentColor"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3.5v5h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 2.9 20.5 7v10L12 21.1 3.5 17V7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m3.5 7 8.5 4.1L20.5 7M12 11.1v10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
 </svg>
 
 <div class="app">
@@ -225,6 +228,78 @@
       <button class="btn" data-close-commit>取消</button>
       <button class="btn" id="cmCommit">仅提交</button>
       <button class="btn primary" id="cmCommitPush">提交并推送</button>
+    </div>
+  </div>
+</div>
+
+<!-- ───── 发布 Release 弹窗 ───── -->
+<div class="overlay" id="relOverlay" hidden>
+  <div class="modal release-modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <div class="cm-head">
+        <h2>发布 Release</h2>
+        <div class="cm-sub" id="relSub"></div>
+      </div>
+      <button class="icon-btn" data-close-release><svg class="ico"><use href="#i-close"></use></svg></button>
+    </div>
+
+    <div class="release-body">
+      <div id="relNotice"></div>
+
+      <div class="rel-row">
+        <div class="rel-field">
+          <label for="relTag">版本号 tag</label>
+          <input id="relTag" placeholder="v1.0.0" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="rel-field grow">
+          <label for="relTitle">标题 <span class="rel-tip">留空就用版本号</span></label>
+          <input id="relTitle" placeholder="例如：首个可用版本" spellcheck="false" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="rel-field">
+        <label for="relNotes">更新说明 <span class="rel-tip">支持 Markdown</span></label>
+        <textarea id="relNotes" rows="4" placeholder="这次改了什么？支持 Markdown，留空就只显示标题" spellcheck="false"></textarea>
+      </div>
+
+      <div class="rel-assets">
+        <div class="rel-assets-head">
+          <span>资产文件</span>
+          <button class="btn sm" id="relAddFile" type="button">
+            <svg class="ico"><use href="#i-plus"></use></svg>添加文件
+          </button>
+        </div>
+        <label class="rel-zip">
+          <input type="checkbox" id="relAutoZip" checked>
+          <span>自动把项目打包成 zip</span>
+          <em id="relZipHint"></em>
+        </label>
+        <div class="rel-filelist" id="relFiles"></div>
+
+        <div class="rel-picker" id="relPicker" hidden>
+          <div class="picker-bar">
+            <button class="btn sm" id="relUp" type="button" title="上一级"><svg class="ico"><use href="#i-up"></use></svg></button>
+            <input id="relPath" class="picker-input" placeholder="路径，回车跳转" spellcheck="false" autocomplete="off">
+            <button class="btn sm" id="relPickDone" type="button">完成</button>
+          </div>
+          <div class="rel-flist" id="relFl"></div>
+        </div>
+      </div>
+
+      <div class="rel-opts">
+        <label class="rel-chk"><input type="checkbox" id="relDraft" checked>
+          <span>存为草稿 —— 别人看不到，你检查无误再点发布</span></label>
+        <label class="rel-chk"><input type="checkbox" id="relPre">
+          <span>标记为预发布 Pre-release</span></label>
+      </div>
+
+      <div class="rel-history" id="relHistory"></div>
+    </div>
+
+    <div class="modal-foot">
+      <span class="grow" id="relInfo"></span>
+      <button class="btn" data-close-release>取消</button>
+      <button class="btn primary" id="relPublish">发布</button>
     </div>
   </div>
 </div>

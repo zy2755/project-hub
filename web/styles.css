@@ -1058,3 +1058,298 @@ body {
   .stat { flex: 1 1 44%; }
   .toolbar .btn span { display: none; }
 }
+
+/* ───────── 发布 Release ───────── */
+.release-modal { width: min(660px, 100%); }
+
+.release-body {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 14px 18px 16px;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.rel-row { display: flex; gap: 12px; }
+.rel-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.rel-field.grow { flex: 1; }
+.rel-field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.rel-tip { font-weight: 400; color: var(--text-3); font-size: 11px; margin-left: 3px; }
+
+.rel-field input,
+.rel-field textarea {
+  width: 100%;
+  padding: 8px 11px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: none;
+  transition: border-color .14s, background .14s;
+}
+.rel-field input { height: 34px; }
+.rel-field textarea {
+  resize: vertical;
+  min-height: 74px;
+  line-height: 1.55;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  font-size: 12.5px;
+}
+.rel-field input:focus,
+.rel-field textarea:focus { border-color: var(--accent); background: var(--card); }
+.rel-field input::placeholder,
+.rel-field textarea::placeholder { color: var(--text-3); }
+#relTag { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; }
+
+/* 提示条 */
+.rel-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text-2);
+}
+.rel-notice .ico { width: 14px; height: 14px; flex: none; margin-top: 1px; }
+.rel-notice.warn {
+  border-color: rgba(217, 129, 0, .35);
+  background: rgba(217, 129, 0, .08);
+  color: var(--amber);
+}
+.rel-notice.err {
+  border-color: rgba(221, 59, 59, .35);
+  background: rgba(221, 59, 59, .07);
+  color: var(--red);
+}
+.rel-notice.info {
+  border-color: rgba(47, 111, 237, .3);
+  background: rgba(47, 111, 237, .06);
+  color: var(--blue);
+}
+
+/* 资产区 */
+.rel-assets {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 11px 12px 12px;
+  background: var(--bg);
+}
+.rel-assets-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 7px;
+}
+.rel-assets-head .btn { height: 26px; padding: 0 9px; font-size: 11.5px; }
+
+.rel-zip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 3px 0;
+}
+.rel-zip input { accent-color: var(--accent); }
+.rel-zip em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.rel-filelist { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.rel-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.rel-file .ico { width: 14px; height: 14px; color: var(--accent); flex: none; }
+.rel-file .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  color: var(--text);
+}
+.rel-file .sz {
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.rel-file .rm {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  flex: none;
+}
+.rel-file .rm:hover { background: rgba(221, 59, 59, .12); color: var(--red); }
+.rel-file .rm .ico { width: 13px; height: 13px; color: inherit; }
+
+/* 内联文件浏览器 */
+.rel-picker { margin-top: 9px; }
+.rel-picker .picker-bar { display: flex; gap: 6px; margin-bottom: 7px; }
+.rel-picker .picker-input {
+  flex: 1;
+  height: 29px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+}
+.rel-picker .picker-input:focus { border-color: var(--accent); }
+.rel-picker .btn { height: 29px; padding: 0 9px; font-size: 12px; }
+
+.rel-flist {
+  max-height: 196px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+  padding: 4px;
+}
+.rel-frow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-2);
+}
+.rel-frow:hover { background: var(--bg); }
+.rel-frow .ico { width: 14px; height: 14px; flex: none; color: var(--text-3); }
+.rel-frow.dir .ico { color: var(--accent); }
+.rel-frow .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rel-frow .sz { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rel-frow.on { background: var(--accent-bg); color: var(--accent); }
+.rel-frow.on .ico { color: var(--accent); }
+.rel-frow .tick { width: 14px; height: 14px; flex: none; opacity: 0; }
+.rel-frow.on .tick { opacity: 1; }
+.rel-fempty {
+  padding: 16px 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* 选项 */
+.rel-opts { display: flex; flex-direction: column; gap: 7px; }
+.rel-chk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.rel-chk input { accent-color: var(--accent); flex: none; }
+
+/* 已有 release */
+.rel-history { display: flex; flex-direction: column; gap: 5px; }
+.rel-history .hd {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 1px;
+}
+.rel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12px;
+}
+.rel-item .tg {
+  font-family: "Cascadia Mono", Consolas, "SF Mono", monospace;
+  font-weight: 650;
+  color: var(--text);
+  flex: none;
+}
+.rel-item .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+.rel-item .stab {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  flex: none;
+}
+.rel-item .stab.draft { color: var(--amber); background: rgba(217, 129, 0, .12); }
+.rel-item .stab.pre { color: var(--blue); background: rgba(47, 111, 237, .1); }
+.rel-item .stab.pub { color: var(--green); background: rgba(15, 157, 99, .1); }
+.rel-item a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 11.5px;
+  flex: none;
+}
+.rel-item a:hover { text-decoration: underline; }
+
+@media (max-width: 720px) {
+  .rel-row { flex-direction: column; gap: 10px; }
+}
+
+/* 资产名被改写的提示 */
+.rel-file .nm em {
+  font-style: normal;
+  color: var(--amber);
+  font-size: 11px;
+  margin-left: 6px;
+}
+.rel-note {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--amber);
+}

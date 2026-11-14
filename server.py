@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -762,6 +763,471 @@ def git_pull(record: dict) -> dict:
     return result
 
 
+# ─────────────────────────── Release 资产发布 ───────────────────────────
+#
+# 这一块和上面所有功能有个本质区别：它是**第一个要联网的写操作**。
+# 走的是 gh CLI（用户机器上基本都有，且已登录的话凭据现成），
+# 而不是自己拼 GitHub REST —— 上传、分片、断点这些细节 gh 都处理好了。
+
+def _gh_bin() -> str:
+    """定位 gh.exe。找不到返回空串。"""
+    gh = shutil.which("gh")
+    if gh:
+        return gh
+    for cand in (
+        r"C:\Program Files\GitHub CLI\gh.exe",
+        r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe"),
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _gh_env() -> dict:
+    """gh 子进程环境：禁掉一切会卡住或污染输出的行为。"""
+    env = _git_env()
+    env["GH_PROMPT_DISABLED"] = "1"     # 需要交互时直接失败，别挂住
+    env["GH_NO_UPDATE_NOTIFIER"] = "1"  # 别顺便去查新版本
+    env["GH_PAGER"] = "cat"
+    env["NO_COLOR"] = "1"               # 去掉颜色控制符，免得混进报错文本
+    return env
+
+
+def _gh_run(repo: str, *args: str, timeout: int = 90) -> tuple[int, str, str]:
+    """
+    执行 gh，返回 (返回码, stdout, stderr)。
+
+    注意 decode("utf-8")：Windows 上如果把 text=True 交给 subprocess，
+    它会按系统代码页（cp936）解码，gh 输出里的中文会直接变乱码。
+    """
+    gh = _gh_bin()
+    if not gh:
+        return 127, "", "没找到 gh 命令行工具"
+    try:
+        proc = subprocess.run(
+            [gh, *args], cwd=repo if repo and os.path.isdir(repo) else None,
+            capture_output=True, timeout=timeout, env=_gh_env(), **NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"命令超过 {timeout} 秒没返回"
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", str(exc)
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8", "replace"),
+        proc.stderr.decode("utf-8", "replace"),
+    )
+
+
+def _gh_error(text: str) -> str:
+    """把 gh 的报错翻成能照着做的中文。"""
+    low = (text or "").lower()
+    if "not logged in" in low or "authentication" in low or "gh auth login" in low \
+            or "http 401" in low or "bad credentials" in low:
+        return "gh 还没登录 GitHub。在终端执行一次 gh auth login 再回来。"
+    if "could not resolve host" in low or "dial tcp" in low or "timeout" in low \
+            or "connection refused" in low or "proxyconnect" in low:
+        return "连不上 GitHub。检查网络；如果你平时靠代理上网，需要先让 gh 走代理" \
+               "（设置环境变量 HTTPS_PROXY=http://127.0.0.1:7890）。"
+    if "http 404" in low or "not found" in low:
+        return "GitHub 上找不到这个仓库，或者当前账号没有权限访问"
+    if "http 403" in low:
+        return "没有权限操作这个仓库的 release，确认它属于当前登录的账号"
+    if "already exists" in low:
+        return "这个版本号已经有 release 了，换一个，或去 GitHub 上删掉旧的"
+    if "tag" in low and ("exist" in low or "invalid" in low):
+        return "版本号（tag）不合法或已存在"
+    if "too large" in low or "payload too large" in low:
+        return "资产文件超过 GitHub 单文件 2GB 上限"
+    body = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return (body[-1] if body else "")[:220] or "发布失败，原因未知"
+
+
+# 打包时永远跳过的目录 —— 这些是缓存/构建产物，进源码包纯属添乱
+PACK_SKIP = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv", ".idea", ".vscode",
+    ".pytest_cache", ".mypy_cache", "dist", "build", ".next", ".nuxt", ".cache",
+}
+
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_asset_name(name: str, index: int = 1) -> str:
+    """
+    把文件名压成 GitHub 认的 ASCII 名字。
+
+    ── 为什么必须做这一步？
+       GitHub 的 release 上传接口会把非 ASCII 字符**直接删掉**：
+         "预览.png"           → "default.png"（整个名字没了）
+         "release-中文.zip"   → "release-.zip"
+         "中文 space 混合.png" → "space.png"
+       我用 Python 直接打 REST 接口验证过，不是 gh 的问题，是服务端行为。
+       所以上传前把名字转好 —— 复制到临时目录用新名字传，资产名才是对的。
+       转完主体为空（纯中文名）就用 asset-N 兜底。
+    """
+    base, ext = os.path.splitext(name or "")
+    ext = _UNSAFE_NAME.sub("", ext)
+    stem = _UNSAFE_NAME.sub("-", base).strip("-._")
+    stem = re.sub(r"-{2,}", "-", stem)
+    if not stem:
+        stem = f"asset-{index}"
+    return f"{stem}{ext}"
+
+
+def _pack_files(path: str) -> list[str]:
+    """
+    取出「该进源码包的文件」清单（相对路径）。
+
+    优先问 git：`ls-files --cached --others --exclude-standard` 给的正好是
+    已跟踪 + 未被忽略的未跟踪文件 —— 也就是 .gitignore 认可的那批。
+    这样打包内容天然和 GitHub 上的源码包一致，也会自动排除 data/ 这类私人目录。
+    不是仓库（或 git 出错）时才退回遍历目录。
+    """
+    code, out, err = _git_run(
+        path, "ls-files", "-z", "--cached", "--others", "--exclude-standard", timeout=60,
+    )
+    if code == 0 and out:
+        files = [f for f in out.split("\0") if f]
+        if files:
+            return files
+
+    found: list[str] = []
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [d for d in dirs if d.lower() not in PACK_SKIP]
+        for n in names:
+            full = os.path.join(root, n)
+            found.append(os.path.relpath(full, path).replace("\\", "/"))
+            if len(found) >= 20000:
+                return found
+    return found
+
+
+def pack_project(path: str, tag: str) -> tuple[str, str, int]:
+    """
+    把项目打成 zip。返回 (zip 路径, 错误信息, 文件数)。
+
+    目录结构是 `项目名/文件...`，和 GitHub 页面上下载的源码包一致，
+    解压出来不会散成一地。
+    """
+    if not os.path.isdir(path):
+        return "", "本地路径不存在", 0
+
+    files = _pack_files(path)
+    if not files:
+        return "", "没有找到可打包的文件", 0
+
+    # zip 内的目录名保留原文（解压出来还是看得懂的中文）
+    # 但 zip 文件名必须是 ASCII，否则传上去会被 GitHub 剥成 ".zip"
+    dir_name = os.path.basename(path.rstrip("\\/")) or "project"
+    file_base = safe_asset_name(dir_name)
+    safe_tag = _UNSAFE_NAME.sub("-", tag).strip("-") or "release"
+    out_dir = DATA_DIR / "_release"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = out_dir / f"{file_base}-{safe_tag}.zip"
+    if zip_path.exists():
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
+
+    count = 0
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for rel in files:
+                full = os.path.join(path, rel.replace("/", os.sep))
+                if not os.path.isfile(full):
+                    continue          # 已跟踪但本地被删了，跳过
+                try:
+                    zf.write(full, f"{dir_name}/{rel}")
+                    count += 1
+                except OSError:
+                    continue          # 单个文件被占用/无权限，不该让整包失败
+    except Exception as exc:  # noqa: BLE001
+        return "", f"打包失败：{exc}", 0
+
+    if not count:
+        return "", "没有打包进任何文件", 0
+    return str(zip_path), "", count
+
+
+def suggest_tag(tags: list[str]) -> str:
+    """按现有 tag 猜下一个版本号：v1.2.3 → v1.2.4；一个都没有就给 v1.0.0。"""
+    best = None
+    for t in tags:
+        m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", t)
+        if m:
+            cur = tuple(int(x) for x in m.groups())
+            if best is None or cur > best:
+                best = cur
+    if best is None:
+        return "v1.0.0"
+    return f"v{best[0]}.{best[1]}.{best[2] + 1}"
+
+
+def _gh_slug(record: dict) -> str:
+    """
+    取出 gh --repo 要的 `owner/repo`。
+
+    repo_slug() 给的是带域名的 `host/owner/repo`（比对远程是否同一个仓库时
+    需要域名），但 gh 的 --repo 只认最后两段。少剥一层就会把
+    "github.com/zy2755" 当成 owner，最后报个看不懂的错。
+    """
+    parts = repo_slug(record.get("github") or "").split("/")
+    if len(parts) < 2:
+        return ""
+    return f"{parts[-2]}/{parts[-1]}"
+
+
+def release_state(record: dict) -> dict:
+    """发布面板要显示的一切：仓库标识、已有 release、tag、当前提交状态。"""
+    path = (record.get("path") or "").strip()
+    github = record.get("github") or ""
+    slug = _gh_slug(record)
+
+    info = {
+        "is_git": False,
+        "has_github": bool(slug),
+        "slug": slug,
+        "gh_ready": bool(_gh_bin()),
+        "gh_error": "",
+        "branch": "",
+        "head": {},
+        "dirty": False,
+        "ahead": 0,
+        "behind": 0,
+        "tags": [],
+        "releases": [],
+        "suggest_tag": "v1.0.0",
+    }
+    if not path or not os.path.isdir(path) or not os.path.isdir(os.path.join(path, ".git")):
+        return info
+    info["is_git"] = True
+
+    info["branch"] = _git(path, "rev-parse", "--abbrev-ref", "HEAD", timeout=8) or ""
+    hh = _git(path, "log", "-1", "--format=%h%x00%an%x00%ct%x00%s", timeout=8)
+    if hh:
+        parts = hh.split("\0")
+        info["head"] = {
+            "hash": parts[0],
+            "author": parts[1] if len(parts) > 1 else "",
+            "at": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0,
+            "msg": parts[3] if len(parts) > 3 else "",
+        }
+
+    porcelain = _git(path, "status", "--porcelain", timeout=10) or ""
+    info["dirty"] = bool(porcelain.strip())
+
+    ab = _git(path, "rev-list", "--left-right", "--count", "@{u}...HEAD", timeout=10)
+    if ab and "\t" in ab:
+        left, right = ab.split("\t")[:2]
+        info["behind"] = int(left) if left.strip().isdigit() else 0
+        info["ahead"] = int(right) if right.strip().isdigit() else 0
+
+    # 本地 tag：倒序，最近的排前面
+    raw = _git(path, "tag", "--sort=-creatordate", timeout=10) or ""
+    info["tags"] = [t for t in raw.splitlines() if t.strip()][:30]
+    info["suggest_tag"] = suggest_tag(info["tags"])
+
+    if not slug:
+        return info
+    if not info["gh_ready"]:
+        info["gh_error"] = "没检测到 gh 命令行工具，装一个才能发布：https://cli.github.com"
+        return info
+
+    code, out, err = _gh_run(
+        path, "release", "list", "--repo", slug, "--limit", "15",
+        # 注意：url 不在 gh release list 支持的字段里，传了会报 Unknown JSON field
+        "--json", "tagName,name,isDraft,isPrerelease,publishedAt", timeout=45,
+    )
+    if code == 0:
+        try:
+            rels = json.loads(out or "[]")
+        except ValueError:
+            rels = []
+        info["releases"] = [
+            {
+                "tag": r.get("tagName") or "",
+                "name": r.get("name") or "",
+                "draft": bool(r.get("isDraft")),
+                "pre": bool(r.get("isPrerelease")),
+                "at": r.get("publishedAt") or "",
+                # 草稿的 tag 还没真正创建，tag 页面会 404，所以指到 release 列表
+                "url": (f"https://github.com/{slug}/releases" if r.get("isDraft")
+                        else f"https://github.com/{slug}/releases/tag/{r.get('tagName') or ''}"),
+            }
+            for r in rels if isinstance(r, dict)
+        ]
+    else:
+        info["gh_error"] = _gh_error(err or out)
+    return info
+
+
+def release_publish(record: dict, payload: dict) -> dict:
+    """
+    创建 GitHub release 并上传资产。
+
+    顺序上把「能不能发」的检查全做在前面 —— 一旦文件开始上传，
+    中途失败会在 GitHub 上留下一个草稿，反复几次会有垃圾。
+    """
+    path = (record.get("path") or "").strip()
+    if not path or not os.path.isdir(path):
+        return {"ok": False, "error": "本地路径不存在"}
+    slug = _gh_slug(record)
+    if not slug:
+        return {"ok": False, "error": "这个项目还没关联 GitHub 仓库，先在编辑里填上地址"}
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return {"ok": False, "error": "这个目录不是 Git 仓库"}
+    if not _gh_bin():
+        return {"ok": False, "error": "没检测到 gh 命令行工具，装一个才能发布：https://cli.github.com"}
+
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "版本号（tag）不能为空"}
+    if tag.startswith("-") or ".." in tag or not re.fullmatch(r"[A-Za-z0-9._\-/]+", tag):
+        return {"ok": False, "error": "版本号只能用字母、数字和 . - _ /，且不能以 - 开头"}
+
+    title = (payload.get("title") or "").strip() or tag
+    notes = (payload.get("notes") or "").strip()
+    draft = bool(payload.get("draft", True))
+    pre = bool(payload.get("prerelease", False))
+
+    # 未推送的提交必须拦住：release 的 tag 是打在**远端** commit 上的，
+    # 本地没推的话，发出去的包和仓库里的代码会差一截，而且用户不会发现。
+    ab = _git(path, "rev-list", "--left-right", "--count", "@{u}...HEAD", timeout=10)
+    ahead = 0
+    if ab and "\t" in ab:
+        right = ab.split("\t")[1] if len(ab.split("\t")) > 1 else "0"
+        ahead = int(right.strip()) if right.strip().isdigit() else 0
+    if ahead > 0:
+        return {
+            "ok": False,
+            "error": f"本地有 {ahead} 个提交还没推送。release 的 tag 会打在远程的旧提交上，"
+                     f"先推送再发布。",
+        }
+
+    # 收资产：自动打包 + 用户挑的文件
+    assets: list[str] = []
+    staged: list[str] = []      # 为了改名而临时复制的副本，传完就删
+    renamed: list[dict] = []    # 名字被改过的，要如实告诉用户
+    packed = 0
+    if payload.get("auto_zip", True):
+        zp, err, packed = pack_project(path, tag)
+        if err:
+            return {"ok": False, "error": err}
+        assets.append(zp)
+
+    used = {os.path.basename(a).lower() for a in assets}
+    picked = [x.strip() for x in (payload.get("files") or [])
+              if isinstance(x, str) and x.strip()]
+    for idx, fp in enumerate(picked, 1):
+        if not os.path.isfile(fp):
+            continue
+        try:
+            if os.path.getsize(fp) > 2 * 1024 ** 3:
+                return {"ok": False, "error": f"{os.path.basename(fp)} 超过 GitHub 单文件 2GB 上限"}
+        except OSError:
+            pass
+
+        orig = os.path.basename(fp)
+        safe = safe_asset_name(orig, idx)
+        # 同一次上传里两个资产同名会被 GitHub 拒掉，加序号岔开
+        stem, ext = os.path.splitext(safe)
+        n = 2
+        while safe.lower() in used:
+            safe = f"{stem}-{n}{ext}"
+            n += 1
+        used.add(safe.lower())
+
+        if safe == orig:
+            assets.append(fp)            # 原名本来就干净，不用复制
+            continue
+
+        up_dir = DATA_DIR / "_release" / "_up"
+        up_dir.mkdir(parents=True, exist_ok=True)
+        dst = up_dir / safe
+        try:
+            shutil.copyfile(fp, dst)
+        except OSError as exc:
+            return {"ok": False, "error": f"准备资产 {orig} 失败：{exc}"}
+        staged.append(str(dst))
+        assets.append(str(dst))
+        renamed.append({"from": orig, "to": safe})
+
+    if not assets:
+        return {"ok": False, "error": "没有可上传的资产，勾一个来源再发布"}
+
+    # 说明写进临时文件 —— 比塞进命令行参数稳，多行文本不会被 shell 或长度限制折腾
+    notes_file = DATA_DIR / "_release" / "_notes.md"
+    notes_file.parent.mkdir(parents=True, exist_ok=True)
+    notes_file.write_text(notes or f"{title}", encoding="utf-8")
+
+    args = [
+        "release", "create", tag, *assets,
+        "--repo", slug,
+        "--title", title,
+        "--notes-file", str(notes_file),
+    ]
+    if draft:
+        args.append("--draft")
+    if pre:
+        args.append("--prerelease")
+
+    # 600 秒：真有大文件要传时不能太早掐，但也不能无限等
+    code, out, err = _gh_run(path, *args, timeout=600)
+
+    # 临时文件不管成败都清掉，别留在 data 里
+    for a in assets:
+        if a.startswith(str(DATA_DIR / "_release")):
+            try:
+                os.remove(a)
+            except OSError:
+                pass
+    try:
+        os.remove(notes_file)
+    except OSError:
+        pass
+    up_dir = DATA_DIR / "_release" / "_up"
+    if up_dir.is_dir():
+        try:
+            shutil.rmtree(up_dir, ignore_errors=True)
+        except OSError:
+            pass
+
+    if code != 0:
+        return {"ok": False, "error": _gh_error(err or out), "state": release_state(record)}
+
+    # 草稿状态下 GitHub 不给 tag 页面（下载地址是 untagged-xxxx 这种临时路径），
+    # 所以草稿就指到 release 列表页，别给一个点进去 404 的链接
+    if draft:
+        url = f"https://github.com/{slug}/releases"
+    else:
+        url = f"https://github.com/{slug}/releases/tag/{tag}"
+    # 顺手把远端 tag 拉回本地，让 git tag 也能看到 —— 失败无所谓，不影响发布结果
+    _git_run(path, *_gh_helper_args(), "fetch", "--tags", "--quiet", timeout=60)
+
+    tail = []
+    if packed:
+        tail.append(f"源码包 {packed} 个文件")
+    if len(assets) > (1 if payload.get("auto_zip", True) else 0):
+        tail.append(f"共 {len(assets)} 个资产")
+    msg = f"{'已存为草稿' if draft else '已发布'} {tag}"
+    if tail:
+        msg += "（" + "、".join(tail) + "）"
+    # 名字被 GitHub 规则改过的，明说 —— 否则用户去页面找不到自己那个文件
+    if renamed:
+        msg += "；" + "、".join(f"{r['from']} 改名为 {r['to']}" for r in renamed)
+
+    return {
+        "ok": True,
+        "msg": msg,
+        "url": url,
+        "draft": draft,
+        "renamed": renamed,
+        "state": release_state(record),
+    }
+
+
 # ─────────────────────────── 目录扫描 ───────────────────────────
 
 SKIP_DIRS = {
@@ -947,9 +1413,10 @@ def shortcuts_of() -> list[dict]:
     return out
 
 
-def browse_dir(target: str = "") -> dict:
+def browse_dir(target: str = "", with_files: bool = False) -> dict:
     """
     给界面里的「内置目录选择器」用：列出一个目录下的子文件夹。
+    with_files=True 时顺便列出文件（发布资产选择器要用）。
 
     ── 为什么不用系统自带的文件夹对话框？
        那要让服务进程起一个 PowerShell 子进程去弹 WinForms 的 FolderBrowserDialog，
@@ -967,6 +1434,7 @@ def browse_dir(target: str = "") -> dict:
             "self_repo": False,
             "self_github": "",
             "dirs": [{"name": d, "path": d, "is_repo": False} for d in list_drives()],
+            "files": [],
             "shortcuts": shortcuts_of(),
         }
 
@@ -979,21 +1447,28 @@ def browse_dir(target: str = "") -> dict:
         parent = ""  # 已经在盘符根，再往上就是盘符列表
 
     dirs = []
+    files = []
     try:
         with os.scandir(target) as it:
             for e in it:
                 try:
-                    if not e.is_dir(follow_symlinks=False):
-                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name in ("$Recycle.Bin", "System Volume Information",
+                                      "Recovery", ".git"):
+                            continue
+                        dirs.append({
+                            "name": e.name,
+                            "path": e.path,
+                            "is_repo": os.path.exists(os.path.join(e.path, ".git")),
+                        })
+                    elif with_files:
+                        try:
+                            size = e.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            size = 0
+                        files.append({"name": e.name, "path": e.path, "size": size})
                 except OSError:
                     continue
-                if e.name in ("$Recycle.Bin", "System Volume Information", "Recovery", ".git"):
-                    continue
-                dirs.append({
-                    "name": e.name,
-                    "path": e.path,
-                    "is_repo": os.path.exists(os.path.join(e.path, ".git")),
-                })
     except PermissionError:
         raise ValueError("没有权限读取这个目录")
     except OSError as exc:
@@ -1001,6 +1476,14 @@ def browse_dir(target: str = "") -> dict:
 
     # Git 仓库排前面 —— 这个工具的用途就是找仓库，让它先露头
     dirs.sort(key=lambda x: (not x["is_repo"], x["name"].lower()))
+
+    # 文件按「像不像发布产物」排：.zip/.exe/.msi 这些大概率就是要传的资产
+    if with_files:
+        rel_ext = (".zip", ".7z", ".rar", ".tar", ".gz", ".exe", ".msi", ".apk",
+                   ".ipa", ".dmg", ".whl", ".deb", ".rpm", ".jar", ".pkg")
+        files.sort(key=lambda f: (not f["name"].lower().endswith(rel_ext),
+                                  -f["size"], f["name"].lower()))
+        files = files[:1500]
 
     self_repo = os.path.exists(os.path.join(target, ".git"))
     remote = read_remote_from_config(target) if self_repo else None
@@ -1013,6 +1496,7 @@ def browse_dir(target: str = "") -> dict:
         "self_github": normalize_github(remote) or "",
         "self_language": infer_language(target) if self_repo else "",
         "dirs": dirs[:600],
+        "files": files,
         "shortcuts": shortcuts_of(),
     }
 
@@ -1398,9 +1882,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/browse":
             try:
-                return self._ok(browse_dir((payload.get("path") or "").strip()))
+                return self._ok(browse_dir(
+                    (payload.get("path") or "").strip(),
+                    with_files=bool(payload.get("files")),
+                ))
             except ValueError as exc:
                 return self._fail(str(exc))
+
+        # 发布 release：state 查现状，publish 真的发
+        m = re.fullmatch(r"/api/projects/([0-9a-f]+)/release", path)
+        if m:
+            rec = find_project(m.group(1))
+            if not rec:
+                return self._fail("项目不存在", 404)
+            action = (payload.get("action") or "state").strip()
+            if action == "state":
+                return self._ok(release_state(rec))
+            if action == "publish":
+                res = release_publish(rec, payload)
+                if not res.get("ok"):
+                    return self._fail(res.get("error") or "发布失败")
+                return self._ok(
+                    {"url": res.get("url") or "", "state": res.get("state") or {}},
+                    res.get("msg") or "已发布",
+                )
+            return self._fail(f"未知操作：{action}")
 
         if path == "/api/open":
             rec = find_project(payload.get("id") or "")

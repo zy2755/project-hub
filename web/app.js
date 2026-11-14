@@ -287,7 +287,9 @@ function cardHtml(p) {
       <button class="act" data-act="folder" title="在资源管理器里打开">${icon('i-folder')}打开</button>
       <button class="act ${p.github ? '' : 'dim'}" data-act="github"
         title="${p.github ? '打开 GitHub 仓库' : '还没有关联 GitHub 仓库，点这里补上'}">${icon('i-github')}</button>
-      <button class="act" data-act="vscode" title="用 VS Code 打开">${icon('i-code')}Code</button>
+      <button class="act ghostly" data-act="release"
+        title="发布 Release：把打包产物传到 GitHub">${icon('i-tag')}</button>
+      <button class="act" data-act="vscode" title="用 VS Code 打开">${icon('i-code')}</button>
       <button class="act ghostly push" data-act="edit" title="编辑">${icon('i-edit')}</button>
       <button class="act ghostly danger" data-act="del" title="从列表移除">${icon('i-trash')}</button>
     </div>
@@ -749,6 +751,273 @@ async function runSync(action) {
   }
 }
 
+/* ───────── 发布 Release ───────── */
+
+const REL = {
+  id: null,
+  rec: null,
+  state: null,
+  files: [],                        // 用户额外挑的现成文件
+  busy: false,
+  picker: { path: '', data: null },
+};
+
+function relSize(n) {
+  if (n === undefined || n === null || Number.isNaN(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+async function openRelease(p) {
+  REL.id = p.id;
+  REL.rec = p;
+  REL.state = null;
+  REL.files = [];
+  REL.busy = false;
+  REL.picker = { path: p.path || '', data: null };
+
+  $('#relSub').textContent = p.path || '';
+  $('#relTag').value = '';
+  $('#relTitle').value = '';
+  $('#relNotes').value = '';
+  $('#relDraft').checked = true;
+  $('#relPre').checked = false;
+  $('#relAutoZip').checked = true;
+  $('#relPicker').hidden = true;
+  $('#relFiles').innerHTML = '';
+  $('#relHistory').innerHTML = '';
+  $('#relZipHint').textContent = '';
+  $('#relInfo').textContent = '';
+  $('#relNotice').innerHTML = '<div class="rel-notice">正在读取仓库信息…</div>';
+  $('#relPublish').disabled = true;
+  $('#relPublish').textContent = '发布';
+  $('#relOverlay').hidden = false;
+
+  try {
+    const s = await api(`/api/projects/${p.id}/release`, { action: 'state' });
+    REL.state = s;
+    if (!$('#relTag').value) $('#relTag').value = s.suggest_tag || 'v1.0.0';
+    renderRelease();
+  } catch (e) {
+    $('#relNotice').innerHTML = `<div class="rel-notice err">${icon('i-alert')}
+      <div>${esc(e.message)}</div></div>`;
+  }
+}
+
+function releaseNotices(s) {
+  const out = [];
+  if (!s.is_git) {
+    out.push(['err', '这个目录不是 Git 仓库，发不了 Release']);
+  } else if (!s.has_github) {
+    out.push(['err', '还没有关联 GitHub 仓库。先在卡片上点铅笔填好地址，再回来发布']);
+  } else if (!s.gh_ready) {
+    out.push(['err', s.gh_error || '没检测到 gh 命令行工具，装一个才能发布：https://cli.github.com']);
+  } else if (s.gh_error) {
+    out.push(['err', s.gh_error]);
+  } else if (s.ahead > 0) {
+    // 这是最容易踩的坑：release 的 tag 打在**远端**提交上
+    out.push(['err', `本地有 ${s.ahead} 个提交还没推送。发布前先推送，否则 tag 会打在远程的旧代码上`]);
+  } else if (s.dirty) {
+    out.push(['warn', '工作区有未提交的改动：源码包会包含这些改动，但仓库里的 tag 指向最后一次提交']);
+  }
+  if (s.behind > 0 && s.is_git) {
+    out.push(['warn', `远程有 ${s.behind} 个新提交，建议先拉取再发布`]);
+  }
+  return out.map(([cls, txt]) => `<div class="rel-notice ${cls}">${icon('i-alert')}
+    <div>${esc(txt)}</div></div>`).join('');
+}
+
+function renderRelease() {
+  const s = REL.state;
+  if (!s) return;
+
+  $('#relNotice').innerHTML = releaseNotices(s);
+  renderRelFiles();
+  renderRelHistory(s);
+
+  const blocked = !s.is_git || !s.has_github || !s.gh_ready || !!s.gh_error || s.ahead > 0;
+  $('#relPublish').disabled = blocked || REL.busy;
+  $('#relZipHint').textContent = $('#relAutoZip').checked
+    ? '排除 .git 和 .gitignore 里的文件'
+    : '';
+}
+
+/* GitHub 会把资产名里的非 ASCII 字符直接删掉（"预览.png" 会变成 default.png），
+   所以上传前要换成 ASCII 名。这里跟后端的 safe_asset_name 保持同一套规则，
+   好让用户在点发布之前就能看到实际会用哪个名字。 */
+function safeAssetName(name, i = 1) {
+  const s = String(name || '');
+  const dot = s.lastIndexOf('.');
+  let stem = dot > 0 ? s.slice(0, dot) : s;
+  let ext = dot > 0 ? s.slice(dot) : '';
+  ext = ext.replace(/[^A-Za-z0-9._-]+/g, '');
+  stem = stem.replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-._]+/, '').replace(/[-._]+$/, '')
+    .replace(/-{2,}/g, '-');
+  if (!stem) stem = `asset-${i}`;
+  return stem + ext;
+}
+
+function renderRelFiles() {
+  const box = $('#relFiles');
+  if (!REL.files.length) {
+    box.innerHTML = '';
+    return;
+  }
+  let anyRenamed = false;
+  const rows = REL.files.map((f, i) => {
+    const safe = safeAssetName(f.name, i + 1);
+    const changed = safe !== f.name;
+    if (changed) anyRenamed = true;
+    return `<div class="rel-file">
+      ${icon('i-file')}
+      <span class="nm" title="${esc(f.path)}">${esc(f.name)}${
+        changed ? `<em>→ ${esc(safe)}</em>` : ''}</span>
+      <span class="sz">${relSize(f.size)}</span>
+      <button class="rm" data-rm="${i}" title="移除">${icon('i-close')}</button>
+    </div>`;
+  });
+  box.innerHTML = rows.join('') + (anyRenamed
+    ? `<div class="rel-note">GitHub 不接受中文等非 ASCII 资产名，上面标出的才是实际传上去的名字</div>`
+    : '');
+}
+
+function renderRelHistory(s) {
+  const box = $('#relHistory');
+  if (!s.releases || !s.releases.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = '<div class="hd">已有的 Release</div>' + s.releases.map((r) => {
+    const cls = r.draft ? 'draft' : (r.pre ? 'pre' : 'pub');
+    const label = r.draft ? '草稿' : (r.pre ? '预发布' : '已发布');
+    return `<div class="rel-item">
+      <span class="tg">${esc(r.tag)}</span>
+      <span class="nm">${esc(r.name || '')}</span>
+      <span class="stab ${cls}">${label}</span>
+      <a href="${esc(r.url)}" target="_blank" rel="noreferrer">查看</a>
+    </div>`;
+  }).join('');
+}
+
+/* 内置文件浏览器：直接列目录并勾选文件，不走系统对话框 */
+
+async function relBrowse(path) {
+  try {
+    const d = await api('/api/browse', { path: path || '', files: true });
+    REL.picker.data = d;
+    REL.picker.path = d.path;
+    renderRelPicker();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function renderRelPicker() {
+  const d = REL.picker.data;
+  if (!d) return;
+  $('#relPath').value = d.path || '';
+  const picked = new Set(REL.files.map((f) => f.path.toLowerCase()));
+  const rows = [];
+
+  if (d.path && d.parent !== null) {
+    rows.push(`<div class="rel-frow dir" data-up="${esc(d.parent)}">
+      ${icon('i-up')}<span class="nm">返回上一级</span></div>`);
+  }
+  (d.dirs || []).forEach((x) => {
+    rows.push(`<div class="rel-frow dir" data-dir="${esc(x.path)}">
+      ${icon('i-folder')}<span class="nm">${esc(x.name)}</span></div>`);
+  });
+  (d.files || []).forEach((x) => {
+    const on = picked.has(x.path.toLowerCase()) ? ' on' : '';
+    rows.push(`<div class="rel-frow${on}" data-file="${esc(x.path)}"
+      data-name="${esc(x.name)}" data-size="${x.size}">
+      ${icon('i-file')}<span class="nm">${esc(x.name)}</span>
+      <span class="sz">${relSize(x.size)}</span>
+      <svg class="ico tick"><use href="#i-check"></use></svg></div>`);
+  });
+
+  $('#relFl').innerHTML = rows.join('')
+    || `<div class="rel-fempty">这个目录是空的</div>`;
+}
+
+function toggleRelFile(path, name, size) {
+  const i = REL.files.findIndex((f) => f.path.toLowerCase() === path.toLowerCase());
+  if (i >= 0) REL.files.splice(i, 1);
+  else REL.files.push({ path, name, size });
+  renderRelFiles();
+  renderRelPicker();
+}
+
+async function doPublish() {
+  if (REL.busy || !REL.state) return;
+
+  const tag = $('#relTag').value.trim();
+  if (!tag) {
+    $('#relTag').focus();
+    return toast('先填个版本号', true);
+  }
+  const autoZip = $('#relAutoZip').checked;
+  if (!autoZip && !REL.files.length) {
+    return toast('没有可上传的资产：勾上自动打包，或添加几个文件', true);
+  }
+
+  REL.busy = true;
+  const btn = $('#relPublish');
+  btn.disabled = true;
+  btn.textContent = '发布中…';
+  $('#relInfo').textContent = autoZip ? '正在打包并上传，大文件要等一会儿…' : '正在上传…';
+
+  try {
+    const d = await api(`/api/projects/${REL.id}/release`, {
+      action: 'publish',
+      tag,
+      title: $('#relTitle').value.trim(),
+      notes: $('#relNotes').value,
+      draft: $('#relDraft').checked,
+      prerelease: $('#relPre').checked,
+      auto_zip: autoZip,
+      files: REL.files.map((f) => f.path),
+    });
+
+    REL.state = d.state;
+    // 草稿发布后 GitHub 还没建 tag，得说清楚，不然去仓库里找不到会以为失败了
+    const tail = d.state && d.state.releases.find((r) => r.tag === tag);
+    const tip = (tail && tail.draft)
+      ? '草稿已创建。到 GitHub 上点 Publish 之后，tag 才会真正出现在仓库里。'
+      : '已发布，可以去 GitHub 看了。';
+    $('#relNotice').innerHTML = `<div class="rel-notice info">${icon('i-check')}
+      <div>${esc(tip)}${d.url ? ` <a href="${esc(d.url)}" target="_blank"
+        rel="noreferrer" style="color:inherit;text-decoration:underline">打开页面</a>` : ''}</div></div>`;
+    renderRelHistory(REL.state);
+    REL.files = [];
+    renderRelFiles();
+    $('#relPicker').hidden = true;
+    await loadState();
+    silentProbe();
+  } catch (e) {
+    $('#relInfo').textContent = '';
+    toast(e.message, true);
+    // 失败后重拉一次状态：可能 gh 那边已经变了（比如 tag 已存在）
+    try {
+      REL.state = await api(`/api/projects/${REL.id}/release`, { action: 'state' });
+      renderRelease();
+    } catch { /* 拉不到就保持原样 */ }
+  } finally {
+    REL.busy = false;
+    btn.textContent = '发布';
+    if (REL.state) {
+      const s = REL.state;
+      const blocked = !s.is_git || !s.has_github || !s.gh_ready || !!s.gh_error || s.ahead > 0;
+      btn.disabled = blocked;
+    } else {
+      btn.disabled = false;
+    }
+  }
+}
+
 /* ───────── 事件绑定 ───────── */
 
 function bind() {
@@ -802,6 +1071,7 @@ function bind() {
     if (act === 'folder' || act === 'vscode') return doOpen(p.id, act);
     if (act === 'github') return p.github ? doOpen(p.id, 'github') : openForm(p);
     if (act === 'commit') return openCommit(p);
+    if (act === 'release') return openRelease(p);
     if (act === 'edit') return openForm(p);
     if (act === 'del') return removeProject(p);
     if (act === 'fav') return toggleFav(p);
@@ -915,6 +1185,51 @@ function bind() {
     }
   });
 
+  // ── 发布 Release ──
+  $$('[data-close-release]').forEach((b) =>
+    b.addEventListener('click', () => { $('#relOverlay').hidden = true; }));
+
+  $('#relAddFile').addEventListener('click', () => {
+    const box = $('#relPicker');
+    if (!box.hidden) {          // 再点一次收起来
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    relBrowse(REL.picker.path || REL.rec?.path || '');
+  });
+  $('#relPickDone').addEventListener('click', () => { $('#relPicker').hidden = true; });
+  $('#relUp').addEventListener('click', () => {
+    const d = REL.picker.data;
+    if (!d) return;
+    relBrowse(d.parent === null ? '' : d.parent);
+  });
+  $('#relPath').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    relBrowse(e.target.value.trim());
+  });
+  $('#relFl').addEventListener('click', (e) => {
+    const up = e.target.closest('[data-up]');
+    if (up) return relBrowse(up.dataset.up);
+    const dir = e.target.closest('[data-dir]');
+    if (dir) return relBrowse(dir.dataset.dir);
+    const f = e.target.closest('[data-file]');
+    if (f) return toggleRelFile(f.dataset.file, f.dataset.name, Number(f.dataset.size) || 0);
+  });
+  $('#relFiles').addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-rm]');
+    if (!rm) return;
+    REL.files.splice(Number(rm.dataset.rm), 1);
+    renderRelFiles();
+    if (!$('#relPicker').hidden) renderRelPicker();   // 勾选状态跟着变
+  });
+  $('#relAutoZip').addEventListener('change', () => {
+    $('#relZipHint').textContent = $('#relAutoZip').checked
+      ? '排除 .git 和 .gitignore 里的文件' : '';
+  });
+  $('#relPublish').addEventListener('click', doPublish);
+
   // 快捷键
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
@@ -923,6 +1238,7 @@ function bind() {
       $('#scanOverlay').hidden = true;
       $('#pickerOverlay').hidden = true;
       $('#commitOverlay').hidden = true;
+      $('#relOverlay').hidden = true;
     }
     if (typing) return;
     if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
