@@ -94,9 +94,10 @@
 - **打包内容跟 GitHub 的源码包一致** —— 它问的是 git「哪些文件该进版本库」
   （`ls-files --cached --others --exclude-standard`），所以 `.gitignore` 里排除的东西
   一个都不会带上，别人克隆下来看到的和这里打出来的完全一样
-- **默认存为草稿**：传上去但别人看不到，你去 GitHub 检查无误再点 Publish。
-  传错资产可以删掉重传，不会尴尬
-- 面板下方列出已有 Release，标着「草稿 / 预发布 / 已发布」
+- **默认存为草稿**：传上去但别人看不到，检查无误再对外
+- 面板下方列出已有 Release，标着「草稿 / 预发布 / 已发布」；
+  **草稿那一行自带「发布」「删除」两颗小按钮**，不用再跑 GitHub 网页点 Publish ——
+  点「发布」等于 `gh release edit <tag> --draft=false`，点「删除」等于 `gh release delete`
 
 有两条硬性拦截，都是为了不让你发出一个和仓库对不上的包：
 
@@ -231,7 +232,8 @@ git 不会自动走系统代理，得单独告诉它：`git config --global http
 
 **草稿发布之后，在仓库里找不到那个 tag**
 正常。草稿阶段 GitHub 还没真正创建 tag，下载地址是 `untagged-xxxx` 这种临时形式。
-到仓库的 Releases 页面点 **Publish release**，tag 才会出现。
+在发布面板下方那行草稿上点 **发布**（或去仓库的 Releases 页面点 Publish release），
+tag 才会出现。
 
 **想直接发正式版，不要草稿**
 把「存为草稿」的勾去掉就行。但 Release 发出去之后删起来会留痕（tag 还在），
