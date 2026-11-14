@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -594,6 +595,129 @@ def browse_dir(target: str = "") -> dict:
     }
 
 
+# ────────────────────── 把新开的窗口顶到最前 ──────────────────────
+#
+# 为什么需要这一段：
+# 我们是**后台服务进程**，从它启动 explorer.exe / VS Code 时，Windows 的「前台锁」
+# （foreground lock）不允许非前台进程抢焦点 —— 窗口其实开出来了，但排在浏览器窗口
+# 下面，只在任务栏闪一下。这不是 explorer 的问题，任何后台进程启动 GUI 都这样。
+# 做法：等窗口真的出现后，用 SetWindowPos 先钉成 TOPMOST 再撤销（这一步不受前台锁
+# 限制），窗口就落到 z 序最上层；想连焦点一起给，再补一次模拟 Alt 键 —— 系统认定
+# "刚有用户输入"才会放行 SetForegroundWindow。
+
+EXPLORER_CLASSES = ("CabinetWClass", "ExploreWClass")   # 资源管理器
+VSCODE_CLASSES = ("Chrome_WidgetWin_1",)                # VS Code 是 Electron，类名跟 Chrome 一样
+
+_ENUM_PROC = None   # 回调类型缓存，别每次调用都重建
+
+
+def _user32():
+    """取一个声明好原型的 user32 —— 不声明的话 64 位下 HWND 会被截成 32 位。"""
+    u = ctypes.windll.user32
+    if getattr(u, "_ph_typed", False):
+        return u
+    P, I, U = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint
+    W = ctypes.POINTER(ctypes.c_wchar)
+    u.SetWindowPos.argtypes = [P, P, I, I, I, I, U]
+    u.SetForegroundWindow.argtypes = [P]
+    u.SetForegroundWindow.restype = ctypes.c_int
+    u.GetForegroundWindow.restype = P
+    u.IsIconic.argtypes = [P]
+    u.IsIconic.restype = ctypes.c_int
+    u.ShowWindow.argtypes = [P, I]
+    u.GetClassNameW.argtypes = [P, W, I]
+    u.GetWindowTextW.argtypes = [P, W, I]
+    u.BringWindowToTop.argtypes = [P]
+    u.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, U, P]
+    u._ph_typed = True
+    return u
+
+
+def _windows_by_class(classes: tuple[str, ...]) -> dict[int, str]:
+    """枚举当前所有指定类名的顶层窗口 → {hwnd: 窗口标题}"""
+    global _ENUM_PROC
+    if not IS_WIN:
+        return {}
+    if _ENUM_PROC is None:
+        _ENUM_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    u = _user32()
+    found: dict[int, str] = {}
+
+    def cb(hwnd, _lparam):
+        cls = ctypes.create_unicode_buffer(128)
+        if u.GetClassNameW(hwnd, cls, 128) and cls.value in classes:
+            title = ctypes.create_unicode_buffer(512)
+            u.GetWindowTextW(hwnd, title, 512)
+            found[int(hwnd or 0)] = title.value
+        return True
+
+    u.EnumWindows(_ENUM_PROC(cb), 0)
+    return found
+
+
+def _raise_window(hwnd: int) -> None:
+    """把某个窗口提到最前，并尽量把焦点也给它。失败也只是"窗口在后面"，不影响功能。"""
+    if not IS_WIN or not hwnd:
+        return
+    u = _user32()
+    SW_RESTORE = 9
+    HWND_TOPMOST, HWND_NOTOPMOST = ctypes.c_void_p(-1), ctypes.c_void_p(-2)
+    flags = 0x0002 | 0x0001 | 0x0010 | 0x0040  # NOMOVE | NOSIZE | NOACTIVATE | SHOWWINDOW
+    h = ctypes.c_void_p(hwnd)
+    try:
+        if u.IsIconic(h):
+            u.ShowWindow(h, SW_RESTORE)
+        # 钉成置顶再撤销：绕开前台锁，窗口稳稳落到 z 序最上层
+        u.SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        u.SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+        u.BringWindowToTop(h)
+        if u.GetForegroundWindow() != hwnd:
+            u.SetForegroundWindow(h)
+        if u.GetForegroundWindow() != hwnd:
+            # 还抢不到焦点：模拟一次 Alt（单独按 Alt 不触发任何操作），
+            # 让系统认为刚发生过用户输入，前台锁才会松手
+            VK_MENU, KEYUP = 0x12, 0x0002
+            u.keybd_event(VK_MENU, 0, 0, None)
+            u.keybd_event(VK_MENU, 0, KEYUP, None)
+            u.SetForegroundWindow(h)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 窗口置顶失败：{exc}")
+
+
+def promote_window_later(
+    classes: tuple[str, ...], title_hint: str = "",
+    before: dict[int, str] | None = None, timeout: float = 4.0,
+) -> None:
+    """
+    等新窗口真的创建出来，再把它顶到最前。
+
+    必须异步：explorer 从启动到窗口出现有几百毫秒延迟，同步等会把 HTTP 响应拖住。
+    优先认「启动前不存在、现在新出现」的窗口；找不到再按标题匹配兜底
+    （explorer 设了「在同一窗口打开」时会复用旧窗口，那种情况没有新窗口）。
+    """
+    if not IS_WIN:
+        return
+    base = before or {}
+    hint = (title_hint or "").strip().lower()
+
+    def work() -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.1)
+            now = _windows_by_class(classes)
+            fresh = [h for h in now if h not in base]
+            if fresh:
+                _raise_window(fresh[0])
+                return
+            if hint:
+                hits = [h for h, t in now.items() if hint in t.lower()]
+                if hits:
+                    _raise_window(hits[0])
+                    return
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 def open_target(record: dict, target: str) -> tuple[bool, str]:
     path = record.get("path") or ""
     github = record.get("github") or ""
@@ -601,7 +725,9 @@ def open_target(record: dict, target: str) -> tuple[bool, str]:
     if target == "folder":
         if not os.path.isdir(path):
             return False, "本地路径不存在"
+        before = _windows_by_class(EXPLORER_CLASSES)
         os.startfile(path)  # noqa: S606  Windows 专用，打开资源管理器
+        promote_window_later(EXPLORER_CLASSES, os.path.basename(os.path.normpath(path)), before)
         return True, "已打开文件夹"
 
     if target == "github":
@@ -613,8 +739,12 @@ def open_target(record: dict, target: str) -> tuple[bool, str]:
     if target == "vscode":
         if not os.path.isdir(path):
             return False, "本地路径不存在"
+        before = _windows_by_class(VSCODE_CLASSES)
         try:
             subprocess.Popen(f'code "{path}"', shell=True, **NO_WINDOW)
+            # 只按标题里的 "Visual Studio Code" 认窗口 —— 拿项目名去匹配的话，
+            # 浏览器（同为 Chrome_WidgetWin_1）的标签页标题也会被误伤
+            promote_window_later(VSCODE_CLASSES, "visual studio code", before, timeout=8.0)
             return True, "已在 VS Code 打开"
         except Exception as exc:  # noqa: BLE001
             return False, f"VS Code 启动失败：{exc}"
