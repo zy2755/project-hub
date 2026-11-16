@@ -3,6 +3,12 @@
 > 管「本地项目文件夹」和「对应 GitHub 仓库」的对应关系。
 > 日常操作全在本机（只有推送和发布 Release 才联网），零第三方依赖，数据只存在你自己的硬盘上。
 
+> **A local dashboard for your local projects and their GitHub repos.** Track every repo's real Git status
+> (branch, uncommitted changes, ahead/behind), commit and push without leaving the app, and publish GitHub
+> Releases with assets — all from a browser that looks like a native desktop window. Zero third-party
+> dependencies, no Node, no account. Your project list stays in a local JSON file and is never uploaded;
+> only push and Release touch the network. Windows: double-click `启动项目管家.bat` to start.
+
 ![界面预览](预览.png)
 
 选文件夹用的是内置目录浏览器，Git 仓库会标绿：
